@@ -402,9 +402,22 @@ jobs:
           printf '%s\n' test-files/*.ts \
             | xargs -P "$NJOBS" -n 1 -I{} bash -c 'compile_one "$@"' _ {}
 
-          PASS=$(ls -1 "$LOGS_DIR"/*.pass 2>/dev/null | wc -l | tr -d ' ')
-          FAIL=$(ls -1 "$LOGS_DIR"/*.fail 2>/dev/null | wc -l | tr -d ' ')
-          SKIP=$(ls -1 "$LOGS_DIR"/*.skip 2>/dev/null | wc -l | tr -d ' ')
+          # Count markers via shopt nullglob + bash array length. Pre-fix
+          # we used `ls -1 "$LOGS_DIR"/*.fail | wc -l` which fails when
+          # no matches exist (`ls` exits 1 on missing files), and with
+          # GH Actions' default `bash -eo pipefail` the failed pipe
+          # propagates errexit and kills the script BEFORE printing the
+          # summary line — so a clean run with zero failures still made
+          # compile-smoke exit 1 (PR #285 / v0.5.379 introduced this).
+          # nullglob makes an empty glob expand to nothing instead of
+          # the literal pattern, so the array length is correctly 0.
+          shopt -s nullglob
+          pass_files=("$LOGS_DIR"/*.pass)
+          fail_files=("$LOGS_DIR"/*.fail)
+          skip_files=("$LOGS_DIR"/*.skip)
+          PASS=${#pass_files[@]}
+          FAIL=${#fail_files[@]}
+          SKIP=${#skip_files[@]}
           echo "Compile smoke: $PASS passed, $FAIL failed, $SKIP skipped"
 
           if [[ $FAIL -gt 0 ]]; then
