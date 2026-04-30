@@ -601,13 +601,22 @@ jobs:
         if: matrix.os == 'windows-2022'
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Install GTK4 + Xvfb + PulseAudio headers (Linux)
+      - name: Install GTK4 + GStreamer + Xvfb + PulseAudio headers (Linux)
         if: matrix.os == 'ubuntu-24.04'
         run: |
           sudo apt-get update
+          # libgstreamer1.0-dev + libgstreamer-plugins-base1.0-dev added in
+          # v0.5.442 for PR #371 (perry/media streaming playback, #351).
+          # gstreamer-sys's build script needs `gstreamer-1.0.pc` findable
+          # via pkg-config; without these two packages doc-tests-gtk4 fails
+          # at the cargo build step with "Package gstreamer-1.0 was not
+          # found in the pkg-config search path". gstreamer-base is the
+          # transitive dep gstreamer-base-sys needs for the playbin element
+          # that perry/media wraps.
           sudo apt-get install -y \
             libgtk-4-dev libadwaita-1-dev xvfb pkg-config \
-            libpulse-dev
+            libpulse-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 
       - name: Surface Android NDK location (for cross-compile)
         if: matrix.os == 'macos-14' || matrix.os == 'ubuntu-24.04'
