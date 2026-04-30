@@ -328,13 +328,23 @@ jobs:
   # ---------------------------------------------------------------------------
   homebrew:
     needs: build
-    if: github.event_name == 'release'
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Get release info
         id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # workflow_dispatch fallback: github.event.release.tag_name is
+          # only set for `release` events. When triggered manually, fall
+          # back to the latest published release tag — same pattern the
+          # upload step uses (see v0.5.392 for the publish-jobs sweep).
           TAG="${{ github.event.release.tag_name }}"
+          if [ -z "$TAG" ]; then
+            TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName')
+            echo "workflow_dispatch fallback: using latest release tag $TAG"
+          fi
           VERSION="${TAG#v}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
@@ -440,7 +450,7 @@ jobs:
   # ---------------------------------------------------------------------------
   apt:
     needs: build
-    if: github.event_name == 'release'
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -452,10 +462,17 @@ jobs:
     steps:
       - name: Get release info
         id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ github.event.release.tag_name }}"
+          if [ -z "$TAG" ]; then
+            TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName')
+            echo "workflow_dispatch fallback: using latest release tag $TAG"
+          fi
           VERSION="${TAG#v}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Download build artifact
         uses: actions/download-artifact@v4
@@ -524,15 +541,22 @@ jobs:
   # ---------------------------------------------------------------------------
   apt-repo:
     needs: apt
-    if: github.event_name == 'release'
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Get release info
         id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ github.event.release.tag_name }}"
+          if [ -z "$TAG" ]; then
+            TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName')
+            echo "workflow_dispatch fallback: using latest release tag $TAG"
+          fi
           VERSION="${TAG#v}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Download .deb packages
         uses: actions/download-artifact@v4
@@ -613,14 +637,20 @@ jobs:
   # ---------------------------------------------------------------------------
   winget:
     needs: build
-    if: github.event_name == 'release'
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     steps:
       - name: Get release info
         id: release
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = "${{ github.event.release.tag_name }}"
+          if (-not $tag) {
+            $tag = (gh release list --limit 1 --json tagName --jq '.[0].tagName')
+            Write-Host "workflow_dispatch fallback: using latest release tag $tag"
+          }
           $version = $tag -replace '^v', ''
           echo "version=$version" >> $env:GITHUB_OUTPUT
           echo "tag=$tag" >> $env:GITHUB_OUTPUT
@@ -666,13 +696,19 @@ jobs:
   # ---------------------------------------------------------------------------
   update-workers:
     needs: build
-    if: github.event_name == 'release'
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Get release version
         id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ github.event.release.tag_name }}"
+          if [ -z "$TAG" ]; then
+            TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName')
+            echo "workflow_dispatch fallback: using latest release tag $TAG"
+          fi
           VERSION="${TAG#v}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 

@@ -76,16 +76,19 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Run cargo test
-        # Exclude UI backends that don't build on the macOS-14 CI image:
-        # - perry-ui-ios / perry-ui-tvos / perry-ui-watchos: need their
-        #   respective SDKs (xcrun --sdk iphoneos / appletvos / watchos)
-        #   which are present but not the active SDK.
+        # Exclude UI backends that don't build on the ubuntu-latest CI image:
+        # - perry-ui-macos / perry-ui-ios / perry-ui-tvos / perry-ui-watchos
+        #   / perry-ui-visionos: depend on `objc2` which only compiles on
+        #   Apple platforms (`compile_error!` in objc2/src/lib.rs:219).
         # - perry-ui-gtk4: needs system pango/gtk via pkg-config; runner
-        #   doesn't have them installed.
+        #   image doesn't have libgtk-4-dev installed by default. Wiring
+        #   it in is a follow-up — would add extra Linux UI coverage but
+        #   also extra compile time + an apt-install step.
         # - perry-ui-android: needs Android NDK.
         # - perry-ui-windows: needs win32 headers.
         run: |
           cargo test --workspace \
+            --exclude perry-ui-macos \
             --exclude perry-ui-ios \
             --exclude perry-ui-visionos \
             --exclude perry-ui-tvos \
