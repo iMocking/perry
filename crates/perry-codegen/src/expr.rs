@@ -2724,16 +2724,57 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             // storage, so we preserve the pre-#157 inline scheme here. Typed-
             // array writes go through TypedArraySet which stores via
             // `js_typed_array_set` with the correct per-kind width.
+            //
+            // Issue #412 follow-up: when the receiver is a stale post-grow
+            // array pointer (forwarding marker installed at OLD location by
+            // js_array_grow), the inline `obj_handle + 8 + idx*8` store
+            // writes into OLD's buffer footprint — which is shorter than
+            // the logical length implies, corrupting the next allocation.
+            // Check GC_FLAG_FORWARDED at handle-7; if set, route through
+            // js_array_set_f64_extend whose clean_arr_ptr_mut follows the
+            // forwarding chain to the live new array. Same pattern as
+            // lower_index_set_fast and the IndexGet hot path.
             ctx.current_block = num_set;
             {
                 let blk = ctx.block();
                 let idx_i32 = blk.fptosi(DOUBLE, &idx_box, I32);
-                let idx_i64 = blk.zext(I32, &idx_i32, I64);
-                let byte_off = blk.shl(I64, &idx_i64, "3");
-                let with_hdr = blk.add(I64, &byte_off, "8");
-                let elem_addr = blk.add(I64, &obj_handle, &with_hdr);
-                let elem_ptr = blk.inttoptr(I64, &elem_addr);
-                blk.store(DOUBLE, &val_double, &elem_ptr);
+                let gc_flags_addr = blk.sub(I64, &obj_handle, "7");
+                let gc_flags_ptr = blk.inttoptr(I64, &gc_flags_addr);
+                let gc_flags = blk.load(I8, &gc_flags_ptr);
+                let fwd_bits = blk.and(I8, &gc_flags, "128");
+                let is_fwd = blk.icmp_ne(I8, &fwd_bits, "0");
+                let fwd_lbl_idx = ctx.new_block("iset.num.fwd");
+                let inline_lbl_idx = ctx.new_block("iset.num.inline");
+                let num_done_idx = ctx.new_block("iset.num.done");
+                let fwd_lbl = ctx.block_label(fwd_lbl_idx);
+                let inline_lbl = ctx.block_label(inline_lbl_idx);
+                let num_done_lbl = ctx.block_label(num_done_idx);
+                ctx.block().cond_br(&is_fwd, &fwd_lbl, &inline_lbl);
+
+                ctx.current_block = fwd_lbl_idx;
+                {
+                    let blk = ctx.block();
+                    blk.call(
+                        I64,
+                        "js_array_set_f64_extend",
+                        &[(I64, &obj_handle), (I32, &idx_i32), (DOUBLE, &val_double)],
+                    );
+                    blk.br(&num_done_lbl);
+                }
+
+                ctx.current_block = inline_lbl_idx;
+                {
+                    let blk = ctx.block();
+                    let idx_i64 = blk.zext(I32, &idx_i32, I64);
+                    let byte_off = blk.shl(I64, &idx_i64, "3");
+                    let with_hdr = blk.add(I64, &byte_off, "8");
+                    let elem_addr = blk.add(I64, &obj_handle, &with_hdr);
+                    let elem_ptr = blk.inttoptr(I64, &elem_addr);
+                    blk.store(DOUBLE, &val_double, &elem_ptr);
+                    blk.br(&num_done_lbl);
+                }
+
+                ctx.current_block = num_done_idx;
             }
             ctx.block().br(&merge_lbl);
             ctx.current_block = set_merge;
