@@ -374,7 +374,14 @@ fn inlined_analysis_init(module: &Module) -> Vec<Stmt> {
     }
 
     let mut next_local: u32 = max_local_id_in_module(module).saturating_add(1);
-    let mut budget: usize = 32;
+    // Inline budget — bumped from 32 → 256 to handle Mango's full
+    // refreshConnectionList (which transitively expands to dozens of
+    // makePill / makeLabel / makeMuted / makeCard / makeDangerBtn /
+    // makePrimaryBtn calls). Each inline operation is bounded; the
+    // overall HIR size is a hard upper bound on how many calls can
+    // possibly land. 256 is comfortably above the worst-case Mango
+    // shape (verified at v0.5.491: ~25K bytes Index.ets, ~40 inlines).
+    let mut budget: usize = 256;
     let mut visited: HashSet<FuncId> = HashSet::new();
 
     // Phase A: top-level `Stmt::Expr(Call(FuncRef))` inlining (the
@@ -1343,15 +1350,33 @@ fn collect_mutations_in_expr(
             );
         }
         "textSetFontWeight" => {
-            // Perry passes a numeric weight (100..900). ArkUI accepts the
-            // same numeric range natively, so emit the number; FontWeight
-            // enum aliases (Regular=400, Bold=700, etc.) work too but
-            // numeric is the more lossless mapping.
-            let Some(n) = numeric_arg_resolved(&args[1..], 0, bindings) else {
+            // Perry's signature is `(widget, size: number, weight: number)`
+            // — mirroring Apple's `systemFont(ofSize: weight:)` API where
+            // `weight` is a 0..1 normalized scale (0 = thin/100, 0.5 =
+            // regular/400, 1.0 = bold/900). The pre-fix here read the
+            // SIZE arg as the weight, emitting `.fontWeight(24)` etc.
+            // which is below ArkUI's valid 100..900 range — ArkUI
+            // clamped to 100 (lightest), making text appear translucent
+            // (Mango's "Welcome to Mango" was the visible symptom).
+            //
+            // Resolve both args; map weight into 100..900 (rounded to
+            // the nearest 100 for FontWeight-enum compatibility); emit
+            // BOTH .fontSize() and .fontWeight() so the size always
+            // matches even if a prior textSetFontSize call set it
+            // earlier (the chain order is "last write wins" in ArkUI).
+            let Some(size) = numeric_arg_resolved(&args[1..], 0, bindings) else {
                 return;
             };
+            let weight_scale = numeric_arg_resolved(&args[1..], 1, bindings).unwrap_or(0.5);
+            // Map 0..1 → 100..900, rounded to nearest 100.
+            let weight = (100.0 + 800.0 * weight_scale).clamp(100.0, 900.0);
+            let weight_int = ((weight / 100.0).round() as i64) * 100;
             push_mut(
-                Mutation::Modifier(format!(".fontWeight({})", fmt_num(n))),
+                Mutation::Modifier(format!(
+                    ".fontSize({}).fontWeight({})",
+                    fmt_num(size),
+                    weight_int
+                )),
                 out,
                 cond,
             );
@@ -1676,6 +1701,27 @@ fn mutator_background_color(args: &[Expr]) -> Option<String> {
 /// is to wrap any non-leaf serialized operand in parentheses before
 /// splicing into the parent operator string. Leaf shapes (literals,
 /// LocalGet that resolved to a literal, PropertyGet) don't need wrapping.
+/// On HarmonyOS, the v0.5.477 build.rs-generated stubs return 0/false
+/// for every perry/system + perry/ui FFI symbol that's not implemented
+/// natively. The harvest's constant folder treats calls to these
+/// functions as Lit::Num(0.0) so theme-switching code like
+/// `const dark = isDarkMode()` folds to `dark = false` at codegen
+/// time, picking the light-mode branch. Without this, the unfoldable-
+/// LocalGet heuristic-pick-then-branch fallback selects the dark-mode
+/// branch and Mango renders translucent light-text-on-light-background.
+fn is_harmonyos_zero_fn(name: &str) -> bool {
+    matches!(
+        name,
+        "isDarkMode"
+            | "getDeviceIdiom"
+            | "getDeviceModel"
+            | "getDeviceOSVersion"
+            | "isHighContrast"
+            | "isReducedMotion"
+            | "getNotchHeight"
+    )
+}
+
 /// Returns true iff every leaf in the expression is either a literal,
 /// a compile-time-const LocalGet, or a binding-resolvable LocalGet
 /// whose underlying init is itself cleanly serializable. PropertyGets,
@@ -1908,6 +1954,29 @@ fn evaluate_condition(
                     return to_lit(init, bindings, compile_time_consts);
                 }
                 None
+            }
+            // Known stubbed perry/system + perry/ui functions that
+            // return 0 / false on HarmonyOS (the v0.5.477 build.rs
+            // auto-stubs all return zero values). Treating them as
+            // 0 here makes `dark = isDarkMode()` fold to `dark = 0`
+            // at codegen time, which then propagates through
+            // `dark ? darkColor : lightColor` to pick the light-mode
+            // branch. Without this, the heuristic-pick-then-branch
+            // fallback selects darkColor and Mango renders translucent
+            // light-on-light text.
+            Expr::Call { callee, .. } => match callee.as_ref() {
+                Expr::ExternFuncRef { name, .. } if is_harmonyos_zero_fn(name) => {
+                    Some(Lit::Num(0.0))
+                }
+                Expr::FuncRef(_) => None,
+                _ => None,
+            },
+            // perry/system.isDarkMode() may also surface as a
+            // NativeMethodCall — same treatment.
+            Expr::NativeMethodCall { module, method, .. }
+                if module == "perry/system" && is_harmonyos_zero_fn(method) =>
+            {
+                Some(Lit::Num(0.0))
             }
             Expr::Compare { op, left, right } => {
                 let l = to_lit(left, bindings, compile_time_consts)?;
@@ -2310,12 +2379,26 @@ fn collect_compile_time_constants(init: &[Stmt]) -> HashMap<LocalId, f64> {
 /// Returns the original expression for any non-LocalGet shape so callers
 /// can use it as a transparent identity-or-deref helper.
 fn resolve(expr: &Expr, bindings: &HashMap<LocalId, Expr>) -> Expr {
-    if let Expr::LocalGet(id) = expr {
-        if let Some(init) = bindings.get(id) {
-            return init.clone();
+    // Chase chains of LocalGet → LocalGet → ... → real expr. Phase B
+    // of the inliner introduces aliasing chains: a top-level
+    // `const disconnectBtn = makeDangerBtn(...)` becomes
+    // `const disconnectBtn = LocalGet(remapped_btn)` after the call
+    // gets inlined and substituted. emit_widget needs to chase past
+    // these aliases to find the actual NativeMethodCall(Button, ...).
+    // 16-hop cap mirrors numeric_arg_resolved / resolve_string_arg's
+    // safety bound.
+    let mut cur = expr.clone();
+    for _ in 0..16 {
+        let next = match &cur {
+            Expr::LocalGet(id) => bindings.get(id).cloned(),
+            _ => return cur,
+        };
+        match next {
+            Some(e) => cur = e,
+            None => return cur,
         }
     }
-    expr.clone()
+    cur
 }
 
 /// Emit an ArkUI expression for a perry/ui widget call. Returns the inner
@@ -4994,6 +5077,8 @@ fn numeric_arg_resolved(
         match cur {
             Expr::Number(n) => return Some(*n),
             Expr::Integer(n) => return Some(*n as f64),
+            Expr::Bool(true) => return Some(1.0),
+            Expr::Bool(false) => return Some(0.0),
             Expr::LocalGet(id) => {
                 cur = bindings.get(id)?;
             }
@@ -5011,6 +5096,20 @@ fn numeric_arg_resolved(
                     Some(false) => else_expr,
                     _ => then_expr,
                 };
+            }
+            // HarmonyOS-stubbed perry/system functions return 0 (see
+            // is_harmonyos_zero_fn). Treating them as 0 here makes
+            // theme-color resolution like `txR = dark ? 0.91 : 0.17`
+            // pick the else-branch (light mode) when dark is bound to
+            // `isDarkMode()`.
+            Expr::Call { callee, .. } => match callee.as_ref() {
+                Expr::ExternFuncRef { name, .. } if is_harmonyos_zero_fn(name) => return Some(0.0),
+                _ => return None,
+            },
+            Expr::NativeMethodCall { module, method, .. }
+                if module == "perry/system" && is_harmonyos_zero_fn(method) =>
+            {
+                return Some(0.0);
             }
             _ => return None,
         }
@@ -6882,7 +6981,11 @@ mod tests {
         ));
         m.init.push(mutator_stmt(
             "textSetFontWeight",
-            vec![Expr::LocalGet(id), Expr::Number(700.0)],
+            // (widget, size, weight_scale) — matches Apple's
+            // systemFont(ofSize: weight:) signature. weight_scale 0..1
+            // maps to ArkUI's 100..900 (rounded to nearest 100). 1.0
+            // → 900 (Bold-equivalent).
+            vec![Expr::LocalGet(id), Expr::Number(28.0), Expr::Number(1.0)],
         ));
         m.init.push(mutator_stmt(
             "textSetFontFamily",
@@ -6902,7 +7005,7 @@ mod tests {
         let r = emit_index_ets(&mut m).unwrap().unwrap();
         for must in [
             ".fontSize(28)",
-            ".fontWeight(700)",
+            ".fontWeight(900)",
             ".fontFamily('Inter')",
             ".fontColor('rgba(128, 64, 0, 1)')",
         ] {
