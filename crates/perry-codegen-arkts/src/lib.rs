@@ -600,22 +600,50 @@ fn collect_mutations_in_expr(
             }
         }
         "widgetSetBackgroundGradient" => {
-            // Gradient takes 9 channel args; map approximately to ArkUI
-            // `.linearGradient(...)`. Real ArkUI gradient takes a richer
-            // shape — emit a comment + best-effort stub.
+            // Args: (widget, r1, g1, b1, a1, r2, g2, b2, a2, direction)
+            // — Perry passes two RGBA endpoints in 0..1 channel space
+            // plus a direction flag (0 = vertical / top→bottom, 1 =
+            // horizontal / left→right). Map to ArkUI `.linearGradient(
+            // { angle, colors: [[hex, stop], ...] })`. ArkUI's `angle`
+            // is degrees — 0 = top→bottom (Perry direction 0); 90 =
+            // left→right (Perry direction 1). Resolves channel args
+            // through bindings so theme-bound calls like
+            // `widgetSetBackgroundGradient(box, moR, moG, moB, ...)`
+            // work — Mango's exact pattern.
+            //
+            // If any channel can't be resolved, fall back to a comment
+            // — the previous behavior emitted `'#ffffff'→'#000000'`
+            // which produced white-on-white invisible text and was
+            // worse than no gradient at all.
+            let chans = (0..8)
+                .map(|i| numeric_arg_resolved(&args[1..], i, bindings))
+                .collect::<Option<Vec<_>>>();
+            let Some(chans) = chans else {
+                push_mut(
+                    Mutation::Comment(
+                        "widgetSetBackgroundGradient: channels unresolved, skipped"
+                            .to_string(),
+                    ),
+                    out,
+                    cond,
+                );
+                return;
+            };
+            let direction = numeric_arg_resolved(&args[1..], 8, bindings).unwrap_or(0.0);
+            let to_hex = |r: f64, g: f64, b: f64| {
+                let r = (r * 255.0).round().clamp(0.0, 255.0) as u8;
+                let g = (g * 255.0).round().clamp(0.0, 255.0) as u8;
+                let b = (b * 255.0).round().clamp(0.0, 255.0) as u8;
+                format!("#{:02x}{:02x}{:02x}", r, g, b)
+            };
+            let c1 = to_hex(chans[0], chans[1], chans[2]);
+            let c2 = to_hex(chans[4], chans[5], chans[6]);
+            let angle = if direction == 0.0 { 0 } else { 90 };
             push_mut(
-                Mutation::Comment(
-                    "widgetSetBackgroundGradient → ArkUI .linearGradient(): partial mapping"
-                        .to_string(),
-                ),
-                out,
-                cond,
-            );
-            push_mut(
-                Mutation::Modifier(
-                    ".linearGradient({ angle: 90, colors: [['#ffffff', 0.0], ['#000000', 1.0]] })"
-                        .to_string(),
-                ),
+                Mutation::Modifier(format!(
+                    ".linearGradient({{ angle: {}, colors: [['{}', 0.0], ['{}', 1.0]] }})",
+                    angle, c1, c2
+                )),
                 out,
                 cond,
             );
@@ -660,6 +688,110 @@ fn collect_mutations_in_expr(
                 out,
                 cond,
             );
+        }
+        // ---- Text styling mutators (#408 follow-up) ----
+        // All four resolve their numeric args through `bindings` so calls
+        // with bound locals (`textSetFontSize(w, size)` where `size` is a
+        // const-bound literal — Mango's pattern) work. When a value can't
+        // be resolved (closure-captured, prop-access, etc.) we skip the
+        // modifier emit entirely — better to leave the default styling
+        // than to emit `.fontSize(0)` which makes the text invisible.
+        "textSetFontSize" => {
+            let Some(n) = numeric_arg_resolved(&args[1..], 0, bindings) else {
+                return;
+            };
+            push_mut(
+                Mutation::Modifier(format!(".fontSize({})", fmt_num(n))),
+                out,
+                cond,
+            );
+        }
+        "textSetFontWeight" => {
+            // Perry passes a numeric weight (100..900). ArkUI accepts the
+            // same numeric range natively, so emit the number; FontWeight
+            // enum aliases (Regular=400, Bold=700, etc.) work too but
+            // numeric is the more lossless mapping.
+            let Some(n) = numeric_arg_resolved(&args[1..], 0, bindings) else {
+                return;
+            };
+            push_mut(
+                Mutation::Modifier(format!(".fontWeight({})", fmt_num(n))),
+                out,
+                cond,
+            );
+        }
+        "textSetFontFamily" => {
+            // Args: (widget, family). Family must resolve to a string
+            // literal — most theme code passes a const-bound string.
+            let mut cur = match args.get(1) {
+                Some(e) => e,
+                None => return,
+            };
+            for _ in 0..16 {
+                match cur {
+                    Expr::String(s) => {
+                        push_mut(
+                            Mutation::Modifier(format!(".fontFamily({})", arkts_string_lit(s))),
+                            out,
+                            cond,
+                        );
+                        return;
+                    }
+                    Expr::LocalGet(id) => {
+                        cur = match bindings.get(id) {
+                            Some(b) => b,
+                            None => return,
+                        };
+                    }
+                    _ => return,
+                }
+            }
+        }
+        "textSetColor" => {
+            // Args: (widget, r, g, b, a?) where each channel is 0..1.
+            // Reuses the same mapping as widgetSetBackgroundColor.
+            let Some(r) = numeric_arg_resolved(&args[1..], 0, bindings) else {
+                return;
+            };
+            let Some(g) = numeric_arg_resolved(&args[1..], 1, bindings) else {
+                return;
+            };
+            let Some(b) = numeric_arg_resolved(&args[1..], 2, bindings) else {
+                return;
+            };
+            let a = numeric_arg_resolved(&args[1..], 3, bindings).unwrap_or(1.0);
+            let r255 = (r * 255.0).round() as i64;
+            let g255 = (g * 255.0).round() as i64;
+            let b255 = (b * 255.0).round() as i64;
+            push_mut(
+                Mutation::Modifier(format!(
+                    ".fontColor('rgba({}, {}, {}, {})')",
+                    r255,
+                    g255,
+                    b255,
+                    fmt_num(a)
+                )),
+                out,
+                cond,
+            );
+        }
+        "textSetWraps" => {
+            // truthy → wrap, falsy → ellipsis. ArkUI's analog is
+            // `.maxLines(0)` for unlimited / `.textOverflow({overflow:
+            // TextOverflow.Ellipsis})` for ellipsis. Map to maxLines.
+            let wraps = match args.get(1) {
+                Some(Expr::Bool(true)) => true,
+                Some(Expr::Number(n)) => *n != 0.0,
+                Some(Expr::Integer(n)) => *n != 0,
+                _ => true,
+            };
+            // 0 = unlimited; 1 = single-line + ellipsis (set via overflow).
+            let modifier = if wraps {
+                ".maxLines(0)".to_string()
+            } else {
+                ".maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })".to_string()
+            };
+            push_mut(Mutation::Modifier(modifier), out, cond);
         }
         "widgetMatchParentWidth" => {
             push_mut(Mutation::Modifier(".width('100%')".to_string()), out, cond);
@@ -1732,7 +1864,18 @@ fn emit_modifier_mutations(muts: &[MutationEntry]) -> String {
                 }
             }
             Mutation::Comment(c) => {
-                out.push_str(&format!("\n// {}", c));
+                // #408 follow-up: must be an inline block comment, NOT a
+                // `// line comment to EOL`. emit_modifier_mutations is
+                // called between modifier chain entries (e.g.
+                // `.padding(...) <here> .visibility(...)`), so any
+                // line-comment swallows the following `.modifier()` call
+                // — `\n// foo.visibility(...)` parses as a single comment
+                // line and the `.visibility` is silently dropped.
+                // Inline block comments don't have that problem; sanitize
+                // for the same `*/`-leaks-out-of-comment hazard #410
+                // already flags on cond_str.
+                let safe = sanitize_for_block_comment(c);
+                out.push_str(&format!(" /* {} */", safe));
             }
             // Structural mutations are handled by the per-widget emitters.
             Mutation::AddChild(_) | Mutation::ClearChildren | Mutation::SetScrollChild(_) => {}
@@ -3983,6 +4126,31 @@ fn numeric_arg(args: &[Expr], idx: usize) -> Option<f64> {
     }
 }
 
+/// Like `numeric_arg`, but resolves `Expr::LocalGet(id)` through `bindings`
+/// — e.g. `let size = 28; textSetFontSize(t, size)` resolves to `28`.
+/// Returns `None` only when the chain bottoms out in a non-numeric leaf
+/// (function call, prop-access, etc.) or hits an unbound local. Mango
+/// uses this pattern heavily for theme-controlled values.
+fn numeric_arg_resolved(
+    args: &[Expr],
+    idx: usize,
+    bindings: &HashMap<LocalId, Expr>,
+) -> Option<f64> {
+    let mut cur = args.get(idx)?;
+    // Bound the walk to avoid pathological binding cycles.
+    for _ in 0..16 {
+        match cur {
+            Expr::Number(n) => return Some(*n),
+            Expr::Integer(n) => return Some(*n as f64),
+            Expr::LocalGet(id) => {
+                cur = bindings.get(id)?;
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
 /// Format a float as ArkTS source. Whole numbers emit without a decimal
 /// (`8`, not `8.0`) to match ArkUI's idiomatic style.
 fn fmt_num(n: f64) -> String {
@@ -5828,6 +5996,128 @@ mod tests {
     }
 
     #[test]
+    fn text_styling_mutators_emit_arkui_modifiers() {
+        // #408 follow-up — `textSetFontSize` / `textSetColor` /
+        // `textSetFontWeight` / `textSetFontFamily` had been falling
+        // through to the unrecognized-mutator path, producing
+        // `// not yet handled` comments instead of real ArkUI modifiers.
+        // Mango uses these heavily for branded title styling — without
+        // them the toolbar shows up as plain default-styled text.
+        let mut m = empty_module();
+        let id: LocalId = 50;
+        m.init.push(let_widget(
+            id,
+            "title",
+            nmc("Text", vec![Expr::String("Mango".into())]),
+        ));
+        m.init.push(mutator_stmt(
+            "textSetFontSize",
+            vec![Expr::LocalGet(id), Expr::Number(28.0)],
+        ));
+        m.init.push(mutator_stmt(
+            "textSetFontWeight",
+            vec![Expr::LocalGet(id), Expr::Number(700.0)],
+        ));
+        m.init.push(mutator_stmt(
+            "textSetFontFamily",
+            vec![Expr::LocalGet(id), Expr::String("Inter".into())],
+        ));
+        m.init.push(mutator_stmt(
+            "textSetColor",
+            vec![
+                Expr::LocalGet(id),
+                Expr::Number(0.5),
+                Expr::Number(0.25),
+                Expr::Number(0.0),
+                Expr::Number(1.0),
+            ],
+        ));
+        m.init.push(app_with_body(Expr::LocalGet(id)));
+        let r = emit_index_ets(&mut m).unwrap().unwrap();
+        for must in [
+            ".fontSize(28)",
+            ".fontWeight(700)",
+            ".fontFamily('Inter')",
+            ".fontColor('rgba(128, 64, 0, 1)')",
+        ] {
+            assert!(
+                r.ets_source.contains(must),
+                "missing {must} in:\n{}",
+                r.ets_source
+            );
+        }
+        // Negative-pin: must NOT be in the unrecognized-mutator branch.
+        assert!(
+            !r.ets_source.contains("textSetFontSize` not yet handled"),
+            "textSetFontSize should be handled, not flagged:\n{}",
+            r.ets_source
+        );
+    }
+
+    #[test]
+    fn unrecognized_mutator_comment_does_not_swallow_following_modifier() {
+        // #408 follow-up — `Mutation::Comment` previously emitted as
+        // `\n// X`, which is a line comment runs to EOL. Modifier
+        // mutations chain on the same physical line in the emitted
+        // ArkTS (e.g. `}.padding(...).visibility(...)`); a `\n// X`
+        // splice between two modifiers caused the second modifier to
+        // be eaten by the comment:
+        //   `}.padding(...)\n// X.visibility(...)`
+        // ArkTS parses `// X.visibility(...)` as one comment line and
+        // the `.visibility` modifier silently disappears. Fix: emit
+        // unrecognized-mutator diagnostics as inline `/* X */` block
+        // comments instead.
+        let mut m = empty_module();
+        let id: LocalId = 60;
+        m.init.push(let_widget(
+            id,
+            "label",
+            nmc("Text", vec![Expr::String("hi".into())]),
+        ));
+        // Sandwich an unrecognized mutator between two recognized ones
+        // so we exercise the "comment between modifiers" shape.
+        m.init.push(mutator_stmt(
+            "textSetFontSize",
+            vec![Expr::LocalGet(id), Expr::Number(20.0)],
+        ));
+        m.init.push(mutator_stmt(
+            "totallyMadeUpMutator",
+            vec![Expr::LocalGet(id), Expr::Number(99.0)],
+        ));
+        m.init.push(mutator_stmt(
+            "widgetSetHidden",
+            vec![Expr::LocalGet(id), Expr::Number(1.0)],
+        ));
+        m.init.push(app_with_body(Expr::LocalGet(id)));
+        let r = emit_index_ets(&mut m).unwrap().unwrap();
+        // Both modifiers AROUND the unrecognized one must be present
+        // and not swallowed.
+        assert!(
+            r.ets_source.contains(".fontSize(20)"),
+            "fontSize should be present:\n{}",
+            r.ets_source
+        );
+        assert!(
+            r.ets_source.contains(".visibility(Visibility.Hidden)"),
+            "visibility should be present after the comment:\n{}",
+            r.ets_source
+        );
+        // The comment itself must use inline block-comment shape.
+        assert!(
+            r.ets_source.contains("/* perry/ui mutator `totallyMadeUpMutator`"),
+            "comment should be inline /* */, not //:\n{}",
+            r.ets_source
+        );
+        // Negative-pin: no `\n// ` patterns in the modifier section
+        // (which would re-introduce the swallow bug).
+        assert!(
+            !r.ets_source.contains("\n// perry/ui mutator"),
+            "comments must not be line comments anymore:\n{}",
+            r.ets_source
+        );
+    }
+
+    #[test]
     fn stack_alignment_value_names_match_axis_enum() {
         // #413 follow-up — `VerticalAlign` doesn't have `Start`/`End`
         // (those exist only on `HorizontalAlign`). It uses `Top`/`Bottom`.
@@ -6722,9 +7012,13 @@ mod tests {
         m.init.push(app_with_body(Expr::LocalGet(id)));
         let r = emit_index_ets(&mut m).unwrap().unwrap();
         let src = &r.ets_source;
+        // v0.5.484 follow-up — `VerticalAlign` enum doesn't have a `Start`
+        // member (only `Top` / `Center` / `Bottom`). Pre-v0.5.484 this
+        // assertion pinned the broken `VerticalAlign.Start` shape that
+        // ArkTS strict-mode rejected. Now the value-name is axis-correct.
         assert!(
-            src.contains(".alignItems(VerticalAlign.Start)"),
-            "HStack must emit VerticalAlign.Start:\n{}",
+            src.contains(".alignItems(VerticalAlign.Top)"),
+            "HStack + start (0) must emit VerticalAlign.Top:\n{}",
             src
         );
         assert!(
