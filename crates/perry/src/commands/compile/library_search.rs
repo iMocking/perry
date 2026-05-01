@@ -1062,9 +1062,6 @@ pub(super) fn build_geisterhand_libs(target: Option<&str>, format: OutputFormat)
     Ok(())
 }
 
-/// A pair of (runtime, stdlib) static libraries built with the auto-mode
-/// chosen profile (custom feature set, optional `panic = "abort"`).
-#[derive(Debug, Clone)]
 #[cfg(test)]
 mod apple_lib_name_tests {
     use super::apple_class_lib_name;
