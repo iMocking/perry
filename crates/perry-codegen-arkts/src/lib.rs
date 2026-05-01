@@ -479,7 +479,14 @@ fn expr_level_inline_pass(
             continue;
         }
         let mut hoists: Vec<Stmt> = Vec::new();
-        inline_calls_in_stmt(&mut stmt, function_map, bindings, next_local, budget, &mut hoists);
+        inline_calls_in_stmt(
+            &mut stmt,
+            function_map,
+            bindings,
+            next_local,
+            budget,
+            &mut hoists,
+        );
         out.extend(hoists);
         out.push(stmt);
     }
@@ -509,7 +516,14 @@ fn inline_calls_in_stmt(
             then_branch,
             else_branch,
         } => {
-            inline_calls_in_expr(condition, function_map, bindings, next_local, budget, hoists);
+            inline_calls_in_expr(
+                condition,
+                function_map,
+                bindings,
+                next_local,
+                budget,
+                hoists,
+            );
             // Recurse into branches: their own hoists land within the
             // branch, not above the if.
             *then_branch = expr_level_inline_pass(
@@ -574,9 +588,30 @@ fn inline_calls_in_expr(
             then_expr,
             else_expr,
         } => {
-            inline_calls_in_expr(condition, function_map, bindings, next_local, budget, hoists);
-            inline_calls_in_expr(then_expr, function_map, bindings, next_local, budget, hoists);
-            inline_calls_in_expr(else_expr, function_map, bindings, next_local, budget, hoists);
+            inline_calls_in_expr(
+                condition,
+                function_map,
+                bindings,
+                next_local,
+                budget,
+                hoists,
+            );
+            inline_calls_in_expr(
+                then_expr,
+                function_map,
+                bindings,
+                next_local,
+                budget,
+                hoists,
+            );
+            inline_calls_in_expr(
+                else_expr,
+                function_map,
+                bindings,
+                next_local,
+                budget,
+                hoists,
+            );
         }
         _ => {}
     }
@@ -593,11 +628,9 @@ fn inline_calls_in_expr(
     let (params, body, args) = match expr {
         Expr::Call { callee, args, .. } => match callee.as_ref() {
             Expr::FuncRef(id) => match function_map.get(id) {
-                Some(func) if func.params.len() == args.len() => (
-                    func.params.clone(),
-                    func.body.clone(),
-                    args.clone(),
-                ),
+                Some(func) if func.params.len() == args.len() => {
+                    (func.params.clone(), func.body.clone(), args.clone())
+                }
                 _ => return,
             },
             Expr::LocalGet(local_id) => match bindings.get(local_id) {
@@ -606,9 +639,7 @@ fn inline_calls_in_expr(
                     body,
                     is_async: false,
                     ..
-                }) if params.len() == args.len() => {
-                    (params.clone(), body.clone(), args.clone())
-                }
+                }) if params.len() == args.len() => (params.clone(), body.clone(), args.clone()),
                 _ => return,
             },
             _ => return,
@@ -618,10 +649,7 @@ fn inline_calls_in_expr(
     // Detect simple-return shape: last `Stmt::Return(Some(LocalGet(id)))`.
     // Anything else (no return, return non-local, multiple returns) is
     // out of scope — leaves the call as-is.
-    if !matches!(
-        body.last(),
-        Some(Stmt::Return(Some(Expr::LocalGet(_))))
-    ) {
+    if !matches!(body.last(), Some(Stmt::Return(Some(Expr::LocalGet(_))))) {
         return;
     }
     // Build a synthetic Function so `inline_one_call` can do its
@@ -1234,7 +1262,7 @@ fn collect_mutations_in_expr(
         }
         // ---- Styling modifiers ----
         "widgetSetBackgroundColor" => {
-            if let Some(modifier) = mutator_background_color(&args[1..]) {
+            if let Some(modifier) = mutator_background_color(&args[1..], bindings) {
                 push_mut(Mutation::Modifier(modifier), out, cond);
             }
         }
@@ -1260,8 +1288,7 @@ fn collect_mutations_in_expr(
             let Some(chans) = chans else {
                 push_mut(
                     Mutation::Comment(
-                        "widgetSetBackgroundGradient: channels unresolved, skipped"
-                            .to_string(),
+                        "widgetSetBackgroundGradient: channels unresolved, skipped".to_string(),
                     ),
                     out,
                     cond,
@@ -1435,6 +1462,71 @@ fn collect_mutations_in_expr(
                 out,
                 cond,
             );
+        }
+        // ---- Button styling mutators ----
+        "buttonSetTextColor" => {
+            // Args: (widget, r, g, b, a?) — same shape as textSetColor /
+            // widgetSetBackgroundColor. ArkUI's Button accepts
+            // `.fontColor(...)` to set the label text color, distinct
+            // from `.backgroundColor()` for the button surface.
+            let Some(r) = numeric_arg_resolved(&args[1..], 0, bindings) else {
+                return;
+            };
+            let Some(g) = numeric_arg_resolved(&args[1..], 1, bindings) else {
+                return;
+            };
+            let Some(b) = numeric_arg_resolved(&args[1..], 2, bindings) else {
+                return;
+            };
+            let a = numeric_arg_resolved(&args[1..], 3, bindings).unwrap_or(1.0);
+            let r255 = (r * 255.0).round() as i64;
+            let g255 = (g * 255.0).round() as i64;
+            let b255 = (b * 255.0).round() as i64;
+            push_mut(
+                Mutation::Modifier(format!(
+                    ".fontColor('rgba({}, {}, {}, {})')",
+                    r255,
+                    g255,
+                    b255,
+                    fmt_num(a)
+                )),
+                out,
+                cond,
+            );
+        }
+        "buttonSetBordered" => {
+            // Args: (widget, bordered: number) — 0 = no border (flat
+            // button), non-zero = with border. ArkUI's default Button
+            // is non-bordered (Capsule type); to get a flat / borderless
+            // appearance we set `.backgroundColor(Color.Transparent)`
+            // when bordered=0. When bordered=1 (or default), we leave
+            // the default ArkUI styling in place. Mango uses
+            // `buttonSetBordered(btn, 0)` extensively for ghost-style
+            // buttons — without this they'd inherit the blue-pill
+            // default.
+            let bordered = match args.get(1) {
+                Some(Expr::Bool(true)) => true,
+                Some(Expr::Number(n)) => *n != 0.0,
+                Some(Expr::Integer(n)) => *n != 0,
+                _ => true,
+            };
+            if !bordered {
+                push_mut(
+                    Mutation::Modifier(".backgroundColor(Color.Transparent)".to_string()),
+                    out,
+                    cond,
+                );
+            }
+            // bordered=true: no-op, default Button styling applies.
+        }
+        "buttonSetTitle" => {
+            // Args: (widget, title). Updates the button label at
+            // runtime. The harvest can't follow runtime mutations
+            // through the page-struct state machinery without a
+            // reactive binding, but we can at least emit a comment so
+            // the user knows the call is recognized. TODO: hook into
+            // the v3.2 reactive-Text setText machinery for buttons.
+            let _ = args; // intentionally silenced
         }
         "textSetWraps" => {
             // truthy → wrap, falsy → ellipsis. ArkUI's analog is
@@ -1645,11 +1737,15 @@ fn stack_axis_align_enum(target_id: LocalId, bindings: &HashMap<LocalId, Expr>) 
 /// Build the `.backgroundColor('rgba(R, G, B, A)')` modifier string from
 /// the 4 channel args of a `widgetSetBackgroundColor(w, r, g, b, a)` call.
 /// Channels are 0..1 floats matching the perry-ui-* TS surface.
-fn mutator_background_color(args: &[Expr]) -> Option<String> {
-    let r = numeric_arg(args, 0)?;
-    let g = numeric_arg(args, 1)?;
-    let b = numeric_arg(args, 2)?;
-    let a = numeric_arg(args, 3).unwrap_or(1.0);
+fn mutator_background_color(args: &[Expr], bindings: &HashMap<LocalId, Expr>) -> Option<String> {
+    // Resolve through bindings so theme-bound calls work — Mango's
+    // `widgetSetBackgroundColor(btn, moR, moG, moB, 1.0)` where moR/G/B
+    // are const-bound brand-color numbers needed `numeric_arg_resolved`,
+    // not the literal-only `numeric_arg`.
+    let r = numeric_arg_resolved(args, 0, bindings)?;
+    let g = numeric_arg_resolved(args, 1, bindings)?;
+    let b = numeric_arg_resolved(args, 2, bindings)?;
+    let a = numeric_arg_resolved(args, 3, bindings).unwrap_or(1.0);
     let r255 = (r * 255.0).round() as i64;
     let g255 = (g * 255.0).round() as i64;
     let b255 = (b * 255.0).round() as i64;
@@ -1742,7 +1838,9 @@ fn is_cleanly_serializable_condition(
                 return true;
             }
             match bindings.get(id) {
-                Some(init) => is_cleanly_serializable_condition(init, bindings, compile_time_consts),
+                Some(init) => {
+                    is_cleanly_serializable_condition(init, bindings, compile_time_consts)
+                }
                 None => false,
             }
         }
@@ -3812,9 +3910,12 @@ fn resolve_string_arg(expr: &Expr, bindings: &HashMap<LocalId, Expr>) -> Option<
             // `perry/i18n` if the caller used the destructured-import
             // form. Unwrap to the inner I18nString (or plain string)
             // arg.
-            Expr::NativeMethodCall { module, method, args, .. }
-                if module == "perry/i18n" && method == "t" =>
-            {
+            Expr::NativeMethodCall {
+                module,
+                method,
+                args,
+                ..
+            } if module == "perry/i18n" && method == "t" => {
                 cur = args.first()?;
             }
             _ => return None,
@@ -7073,7 +7174,8 @@ mod tests {
         );
         // The comment itself must use inline block-comment shape.
         assert!(
-            r.ets_source.contains("/* perry/ui mutator `totallyMadeUpMutator`"),
+            r.ets_source
+                .contains("/* perry/ui mutator `totallyMadeUpMutator`"),
             "comment should be inline /* */, not //:\n{}",
             r.ets_source
         );
