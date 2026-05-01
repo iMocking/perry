@@ -710,12 +710,6 @@ fn collect_mutations_in_expr(
         }
         "stackSetAlignment" => {
             let n = numeric_arg(&args[1..], 0).unwrap_or(0.0) as i64;
-            let v = match n {
-                0 => "Start",
-                1 => "Center",
-                2 => "End",
-                _ => "Start",
-            };
             // Issue #413 — ArkUI's cross-axis enum is axis-dependent:
             // Column (= VStack) takes `HorizontalAlign.X`,
             // Row (= HStack) takes `VerticalAlign.X`. Emitting the
@@ -727,7 +721,23 @@ fn collect_mutations_in_expr(
             // Column case) when the binding can't be resolved — same
             // as v0.5.480 behavior, preserves backwards compatibility
             // for VStack which is the common case.
+            //
+            // The value names also differ per enum:
+            //   HorizontalAlign: Start | Center | End
+            //   VerticalAlign:   Top   | Center | Bottom
+            // Picking `Start`/`End` on `VerticalAlign` is also a
+            // strict-mode error ("Property 'Start' does not exist on
+            // type 'typeof VerticalAlign'") — so we map the same
+            // semantic input value (0=start, 1=center, 2=end) to the
+            // axis-correct value-name.
             let enum_name = stack_axis_align_enum(target_id, bindings);
+            let v = match (enum_name, n) {
+                ("VerticalAlign", 0) => "Top",
+                ("VerticalAlign", 2) => "Bottom",
+                (_, 1) => "Center",
+                ("HorizontalAlign", 2) => "End",
+                _ => "Start",
+            };
             push_mut(
                 Mutation::Modifier(format!(".alignItems({}.{})", enum_name, v)),
                 out,
@@ -5815,6 +5825,47 @@ mod tests {
             "HStack must not emit HorizontalAlign:\n{}",
             r.ets_source
         );
+    }
+
+    #[test]
+    fn stack_alignment_value_names_match_axis_enum() {
+        // #413 follow-up — `VerticalAlign` doesn't have `Start`/`End`
+        // (those exist only on `HorizontalAlign`). It uses `Top`/`Bottom`.
+        // Picking `VerticalAlign.Start` produces an ArkTS strict-mode
+        // error: "Property 'Start' does not exist on type 'typeof
+        // VerticalAlign'". Mango hit this on the browserContent HStack
+        // with stackSetAlignment(0) (= start semantics).
+        //
+        // Same semantic input value (0=start, 1=center, 2=end) must map
+        // to axis-correct value-names — Top/Bottom for VerticalAlign,
+        // Start/End for HorizontalAlign.
+        for (ctor, n_in, expected_modifier) in [
+            ("HStack", 0.0, ".alignItems(VerticalAlign.Top)"),
+            ("HStack", 1.0, ".alignItems(VerticalAlign.Center)"),
+            ("HStack", 2.0, ".alignItems(VerticalAlign.Bottom)"),
+            ("VStack", 0.0, ".alignItems(HorizontalAlign.Start)"),
+            ("VStack", 1.0, ".alignItems(HorizontalAlign.Center)"),
+            ("VStack", 2.0, ".alignItems(HorizontalAlign.End)"),
+        ] {
+            let mut m = empty_module();
+            let id: LocalId = 90;
+            m.init.push(let_widget(
+                id,
+                "w",
+                nmc(ctor, vec![Expr::Number(0.0), Expr::Array(vec![])]),
+            ));
+            m.init.push(mutator_stmt(
+                "stackSetAlignment",
+                vec![Expr::LocalGet(id), Expr::Number(n_in)],
+            ));
+            m.init.push(app_with_body(Expr::LocalGet(id)));
+            let r = emit_index_ets(&mut m).unwrap().unwrap();
+            assert!(
+                r.ets_source.contains(expected_modifier),
+                "{ctor} stackSetAlignment({n_in}) should emit '{expected_modifier}':\n{src}",
+                src = r.ets_source
+            );
+        }
     }
 
     #[test]
