@@ -42,6 +42,7 @@ pub struct MethodCandidate {
 pub fn inline_functions(
     module: &mut Module,
     extra_methods: &HashMap<(String, String), MethodCandidate>,
+    extra_class_fields: &HashMap<(String, String), String>,
 ) {
     // Phases 0 + 1 fused (Tier 4.1, v0.5.335): single iteration over
     // module.functions collects both Math.imul polyfill ids AND
@@ -90,6 +91,25 @@ pub fn inline_functions(
     // collection.
     let mut method_candidates: HashMap<(String, String), MethodCandidate> = HashMap::new();
     let mut class_names: HashMap<String, String> = HashMap::new();
+    // (class_name, field_name) → field's class type (when the field is
+    // declared as `Type::Named(class)`). Populated from this module's local
+    // classes plus any cross-module classes the driver supplies via
+    // `extra_class_fields`. Used by the receiver-class resolver to decide
+    // whether to inline `someLocal.field.method(...)` chains.
+    let mut class_field_types: HashMap<(String, String), String> = HashMap::new();
+    for (k, v) in extra_class_fields {
+        class_field_types.insert(k.clone(), v.clone());
+    }
+    for class in &module.classes {
+        for f in &class.fields {
+            if let Type::Named(field_class) = &f.ty {
+                class_field_types.insert(
+                    (class.name.clone(), f.name.clone()),
+                    field_class.clone(),
+                );
+            }
+        }
+    }
     // Build the `(name, resolved_path) -> Import` map once for deduping.
     // For each Named import in dest, we know which (name, path) is already
     // satisfied. Anything required by an admitted candidate that isn't here
@@ -245,6 +265,7 @@ pub fn inline_functions(
             &mut local_types,
             &mut next_local_id,
             None,
+            &class_field_types,
         );
     }
 
@@ -277,6 +298,7 @@ pub fn inline_functions(
             &mut local_types,
             &mut local_id,
             None,
+            &class_field_types,
         );
         next_module_id = local_id;
     }
@@ -312,6 +334,7 @@ pub fn inline_functions(
                 &mut local_types,
                 &mut local_id,
                 Some(&class_name),
+                &class_field_types,
             );
             next_module_id = local_id;
         }
@@ -996,7 +1019,14 @@ fn is_pure_function(func: &Function) -> bool {
 fn has_simple_control_flow(stmts: &[Stmt]) -> bool {
     for stmt in stmts {
         match stmt {
-            Stmt::Let { .. } | Stmt::Expr(_) | Stmt::Return(_) => {}
+            // `Stmt::Throw` is allowed: an inlined body that throws just
+            // raises the same exception in the caller's frame, which is
+            // the correct propagation semantic for JS. Most ECS code
+            // hot-paths through `private assert*` helpers shaped as
+            // `if (!cond) { throw new Error(...) }` — without inlining,
+            // the assertion is an unconditional cross-module dispatch
+            // per call.
+            Stmt::Let { .. } | Stmt::Expr(_) | Stmt::Return(_) | Stmt::Throw(_) => {}
             Stmt::If {
                 then_branch,
                 else_branch,
@@ -1020,8 +1050,7 @@ fn has_simple_control_flow(stmts: &[Stmt]) -> bool {
             | Stmt::Break
             | Stmt::Continue
             | Stmt::LabeledBreak(_)
-            | Stmt::LabeledContinue(_)
-            | Stmt::Throw(_) => {
+            | Stmt::LabeledContinue(_) => {
                 return false;
             }
         }
@@ -1205,6 +1234,49 @@ fn find_max_local_id(stmts: &[Stmt]) -> LocalId {
     max_id
 }
 
+/// Resolve the static class of a method-call receiver expression. Supports
+/// the three shapes the inliner needs:
+///   - `Expr::LocalGet(id)` whose static type is recorded in `local_types`
+///   - `Expr::This` (only when we're inside a class method, supplied via
+///     `enclosing_class`)
+///   - `Expr::PropertyGet { object, property }` resolved recursively, then
+///     the inner class's `(class, field)` looked up in `class_field_types`
+///
+/// Returns `(class_name, Some(local_id))` when the receiver bottoms out at a
+/// `LocalGet`, so the existing `substitute_this` rewrite can target the right
+/// local. For `This`-rooted chains we return `None` for the local id — the
+/// inlined body's `Expr::This` already refers to the same `this` the caller's
+/// context provides.
+#[allow(dead_code)]
+fn resolve_receiver_class(
+    obj: &Expr,
+    local_types: &HashMap<LocalId, String>,
+    enclosing_class: Option<&str>,
+    class_field_types: &HashMap<(String, String), String>,
+) -> Option<(String, Option<LocalId>)> {
+    match obj {
+        Expr::LocalGet(id) => local_types.get(id).map(|cn| (cn.clone(), Some(*id))),
+        Expr::This => enclosing_class.map(|cn| (cn.to_string(), None)),
+        Expr::PropertyGet { object, property } => {
+            // Recursive resolution: get the inner receiver's class, then
+            // look up the field on that class. Field-walking chains like
+            // `world.commandBuffer.set(...)` benefit — without this the
+            // inliner's receiver match bails at the first non-LocalGet.
+            let (inner_class, _) = resolve_receiver_class(
+                object,
+                local_types,
+                enclosing_class,
+                class_field_types,
+            )?;
+            class_field_types
+                .get(&(inner_class, property.clone()))
+                .cloned()
+                .map(|cn| (cn, None))
+        }
+        _ => None,
+    }
+}
+
 /// True if `s` (or any nested branch) contains a `Stmt::Return`. Used by the
 /// Stmt::Let-init-Call inliner to decide between the "trailing-only" collapse
 /// and the do-while(false) wrapper.
@@ -1331,6 +1403,7 @@ fn inline_calls_in_stmts(
     local_types: &mut HashMap<LocalId, String>,
     next_local_id: &mut LocalId,
     enclosing_class: Option<&str>,
+    class_field_types: &HashMap<(String, String), String>,
 ) {
     let mut i = 0;
     while i < stmts.len() {
@@ -1356,6 +1429,7 @@ fn inline_calls_in_stmts(
                     local_types,
                     next_local_id,
                     enclosing_class,
+                    class_field_types,
                 ) {
                     // When inlining into Stmt::Expr context (result discarded),
                     // convert Stmt::Return(Some(expr)) to Stmt::Expr(expr) and
@@ -1393,6 +1467,7 @@ fn inline_calls_in_stmts(
                             local_types,
                             next_local_id,
                             enclosing_class,
+                            class_field_types,
                         );
                         if !hoisted.is_empty() {
                             new_stmts = Some(hoisted);
@@ -1421,6 +1496,7 @@ fn inline_calls_in_stmts(
                         local_types,
                         next_local_id,
                         enclosing_class,
+                        class_field_types,
                     );
                     if !hoisted.is_empty() {
                         // Hoisted stmts from multi-stmt inlining inside expressions
@@ -1476,6 +1552,7 @@ fn inline_calls_in_stmts(
                         local_types,
                         next_local_id,
                         enclosing_class,
+                        class_field_types,
                     ) {
                         let has_nested_return = inlined_stmts
                             .iter()
@@ -1538,6 +1615,7 @@ fn inline_calls_in_stmts(
                             local_types,
                             next_local_id,
                             enclosing_class,
+                            class_field_types,
                         ),
                         _ => Vec::new(),
                     };
@@ -1561,6 +1639,7 @@ fn inline_calls_in_stmts(
                     local_types,
                     next_local_id,
                     enclosing_class,
+                    class_field_types,
                 );
                 if !hoisted.is_empty() {
                     let current = stmts.remove(i);
@@ -1585,6 +1664,7 @@ fn inline_calls_in_stmts(
                     local_types,
                     next_local_id,
                     enclosing_class,
+                    class_field_types,
                 );
                 // Note: hoisting from conditions is rare and complex; skip for now
                 inline_calls_in_stmts(
@@ -1595,6 +1675,7 @@ fn inline_calls_in_stmts(
                     local_types,
                     next_local_id,
                     enclosing_class,
+                    class_field_types,
                 );
                 if let Some(else_b) = else_branch {
                     inline_calls_in_stmts(
@@ -1605,6 +1686,7 @@ fn inline_calls_in_stmts(
                         local_types,
                         next_local_id,
                         enclosing_class,
+                        class_field_types,
                     );
                 }
             }
@@ -1616,6 +1698,7 @@ fn inline_calls_in_stmts(
                     local_types,
                     next_local_id,
                     enclosing_class,
+                    class_field_types,
                 );
                 inline_calls_in_stmts(
                     body,
@@ -1625,6 +1708,7 @@ fn inline_calls_in_stmts(
                     local_types,
                     next_local_id,
                     enclosing_class,
+                    class_field_types,
                 );
             }
             Stmt::For {
@@ -1643,6 +1727,7 @@ fn inline_calls_in_stmts(
                         local_types,
                         next_local_id,
                         enclosing_class,
+                        class_field_types,
                     );
                     if init_stmts.len() == 1 {
                         **init_stmt = init_stmts.remove(0);
@@ -1656,6 +1741,7 @@ fn inline_calls_in_stmts(
                         local_types,
                         next_local_id,
                         enclosing_class,
+                        class_field_types,
                     );
                 }
                 if let Some(upd) = update {
@@ -1666,6 +1752,7 @@ fn inline_calls_in_stmts(
                         local_types,
                         next_local_id,
                         enclosing_class,
+                        class_field_types,
                     );
                 }
                 inline_calls_in_stmts(
@@ -1676,6 +1763,7 @@ fn inline_calls_in_stmts(
                     local_types,
                     next_local_id,
                     enclosing_class,
+                    class_field_types,
                 );
             }
             _ => {}
@@ -1706,6 +1794,7 @@ fn inline_calls_in_stmts(
                 local_types,
                 next_local_id,
                 enclosing_class,
+                class_field_types,
             );
             stmts.remove(i);
             let inlined_len = inlined.len();
@@ -1728,6 +1817,7 @@ fn inline_calls_in_expr(
     local_types: &HashMap<LocalId, String>,
     next_local_id: &mut LocalId,
     enclosing_class: Option<&str>,
+    class_field_types: &HashMap<(String, String), String>,
 ) -> Vec<Stmt> {
     // First try to inline this expression if it's a call
     if let Some((stmts, mut result)) = try_inline_simple_call(
@@ -1737,6 +1827,7 @@ fn inline_calls_in_expr(
         local_types,
         next_local_id,
         enclosing_class,
+        class_field_types,
     ) {
         let inner = inline_calls_in_expr(
             &mut result,
@@ -1745,6 +1836,7 @@ fn inline_calls_in_expr(
             local_types,
             next_local_id,
             enclosing_class,
+            class_field_types,
         );
         *expr = result;
         let mut all = stmts;
@@ -1765,6 +1857,7 @@ fn inline_calls_in_expr(
                 local_types,
                 next_local_id,
             enclosing_class,
+                class_field_types,
             ));
             hoisted.extend(inline_calls_in_expr(
                 right,
@@ -1773,6 +1866,7 @@ fn inline_calls_in_expr(
                 local_types,
                 next_local_id,
             enclosing_class,
+                class_field_types,
             ));
         }
         Expr::Unary { operand, .. } => {
@@ -1783,6 +1877,7 @@ fn inline_calls_in_expr(
                 local_types,
                 next_local_id,
             enclosing_class,
+                class_field_types,
             ));
         }
         Expr::Conditional {
@@ -1797,6 +1892,7 @@ fn inline_calls_in_expr(
                 local_types,
                 next_local_id,
             enclosing_class,
+                class_field_types,
             ));
             hoisted.extend(inline_calls_in_expr(
                 then_expr,
@@ -1805,6 +1901,7 @@ fn inline_calls_in_expr(
                 local_types,
                 next_local_id,
             enclosing_class,
+                class_field_types,
             ));
             hoisted.extend(inline_calls_in_expr(
                 else_expr,
@@ -1813,6 +1910,7 @@ fn inline_calls_in_expr(
                 local_types,
                 next_local_id,
             enclosing_class,
+                class_field_types,
             ));
         }
         Expr::Call { callee, args, .. } => {
@@ -1823,6 +1921,7 @@ fn inline_calls_in_expr(
                 local_types,
                 next_local_id,
             enclosing_class,
+                class_field_types,
             ));
             for arg in args {
                 hoisted.extend(inline_calls_in_expr(
@@ -1832,6 +1931,7 @@ fn inline_calls_in_expr(
                     local_types,
                     next_local_id,
                 enclosing_class,
+                    class_field_types,
                 ));
             }
         }
@@ -1844,6 +1944,7 @@ fn inline_calls_in_expr(
                     local_types,
                     next_local_id,
                 enclosing_class,
+                    class_field_types,
                 ));
             }
         }
@@ -1856,6 +1957,7 @@ fn inline_calls_in_expr(
                     local_types,
                     next_local_id,
                 enclosing_class,
+                    class_field_types,
                 ));
             }
         }
@@ -1868,6 +1970,7 @@ fn inline_calls_in_expr(
                     local_types,
                     next_local_id,
                 enclosing_class,
+                    class_field_types,
                 ));
             }
         }
@@ -1882,6 +1985,7 @@ fn inline_calls_in_expr(
                             local_types,
                             next_local_id,
                         enclosing_class,
+                            class_field_types,
                         ));
                     }
                 }
@@ -1895,6 +1999,7 @@ fn inline_calls_in_expr(
                 local_types,
                 next_local_id,
             enclosing_class,
+                class_field_types,
             ));
             for arg in args {
                 match arg {
@@ -1906,6 +2011,7 @@ fn inline_calls_in_expr(
                             local_types,
                             next_local_id,
                         enclosing_class,
+                            class_field_types,
                         ));
                     }
                 }
@@ -1919,6 +2025,7 @@ fn inline_calls_in_expr(
                 local_types,
                 next_local_id,
             enclosing_class,
+                class_field_types,
             ));
             hoisted.extend(inline_calls_in_expr(
                 index,
@@ -1927,6 +2034,7 @@ fn inline_calls_in_expr(
                 local_types,
                 next_local_id,
             enclosing_class,
+                class_field_types,
             ));
         }
         Expr::IndexSet {
@@ -1941,6 +2049,7 @@ fn inline_calls_in_expr(
                 local_types,
                 next_local_id,
             enclosing_class,
+                class_field_types,
             ));
             hoisted.extend(inline_calls_in_expr(
                 index,
@@ -1949,6 +2058,7 @@ fn inline_calls_in_expr(
                 local_types,
                 next_local_id,
             enclosing_class,
+                class_field_types,
             ));
             hoisted.extend(inline_calls_in_expr(
                 value,
@@ -1957,6 +2067,7 @@ fn inline_calls_in_expr(
                 local_types,
                 next_local_id,
             enclosing_class,
+                class_field_types,
             ));
         }
         Expr::PropertyGet { object, .. } => {
@@ -1967,6 +2078,7 @@ fn inline_calls_in_expr(
                 local_types,
                 next_local_id,
             enclosing_class,
+                class_field_types,
             ));
         }
         Expr::PropertySet { object, value, .. } => {
@@ -1977,6 +2089,7 @@ fn inline_calls_in_expr(
                 local_types,
                 next_local_id,
             enclosing_class,
+                class_field_types,
             ));
             hoisted.extend(inline_calls_in_expr(
                 value,
@@ -1985,6 +2098,7 @@ fn inline_calls_in_expr(
                 local_types,
                 next_local_id,
             enclosing_class,
+                class_field_types,
             ));
         }
         Expr::LocalSet(_, value) => {
@@ -1995,6 +2109,7 @@ fn inline_calls_in_expr(
                 local_types,
                 next_local_id,
             enclosing_class,
+                class_field_types,
             ));
         }
         Expr::NativeMethodCall { object, args, .. } => {
@@ -2006,6 +2121,7 @@ fn inline_calls_in_expr(
                     local_types,
                     next_local_id,
                 enclosing_class,
+                    class_field_types,
                 ));
             }
             for arg in args {
@@ -2016,6 +2132,7 @@ fn inline_calls_in_expr(
                     local_types,
                     next_local_id,
                 enclosing_class,
+                    class_field_types,
                 ));
             }
         }
@@ -2029,6 +2146,7 @@ fn inline_calls_in_expr(
                 local_types,
                 next_local_id,
             enclosing_class,
+                class_field_types,
             ));
             hoisted.extend(inline_calls_in_expr(
                 index,
@@ -2037,6 +2155,7 @@ fn inline_calls_in_expr(
                 local_types,
                 next_local_id,
             enclosing_class,
+                class_field_types,
             ));
         }
         Expr::Uint8ArraySet {
@@ -2051,6 +2170,7 @@ fn inline_calls_in_expr(
                 local_types,
                 next_local_id,
             enclosing_class,
+                class_field_types,
             ));
             hoisted.extend(inline_calls_in_expr(
                 index,
@@ -2059,6 +2179,7 @@ fn inline_calls_in_expr(
                 local_types,
                 next_local_id,
             enclosing_class,
+                class_field_types,
             ));
             hoisted.extend(inline_calls_in_expr(
                 value,
@@ -2067,6 +2188,7 @@ fn inline_calls_in_expr(
                 local_types,
                 next_local_id,
             enclosing_class,
+                class_field_types,
             ));
         }
         Expr::Uint8ArrayLength(arr) => {
@@ -2077,6 +2199,7 @@ fn inline_calls_in_expr(
                 local_types,
                 next_local_id,
             enclosing_class,
+                class_field_types,
             ));
         }
         Expr::Uint8ArrayNew(Some(arg)) => {
@@ -2087,6 +2210,7 @@ fn inline_calls_in_expr(
                 local_types,
                 next_local_id,
             enclosing_class,
+                class_field_types,
             ));
         }
         // Descend into closure bodies. Without this, the inliner never
@@ -2127,6 +2251,7 @@ fn inline_calls_in_expr(
                 &mut closure_local_types,
                 next_local_id,
                 closure_enclosing.as_deref(),
+                class_field_types,
             );
         }
         _ => {}
@@ -2145,6 +2270,7 @@ fn try_inline_simple_call(
     local_types: &HashMap<LocalId, String>,
     next_local_id: &mut LocalId,
     enclosing_class: Option<&str>,
+    class_field_types: &HashMap<(String, String), String>,
 ) -> Option<(Vec<Stmt>, Expr)> {
     if let Expr::Call { callee, args, .. } = expr {
         // Check for regular function call
@@ -2267,16 +2393,21 @@ fn try_inline_simple_call(
             property: method_name,
         } = callee.as_ref()
         {
-            // Resolve the receiver class:
+            // Resolve the receiver class via `resolve_receiver_class`:
             //   - `Expr::LocalGet(id)` whose static type is a known class:
             //     LocalGet substitution; `Expr::This` in the body rewrites to
             //     `Expr::LocalGet(id)`.
             //   - `Expr::This`, when we're inside a class method of the same
             //     class: `Expr::This` in the body stays `Expr::This` (it
             //     refers to the same `this` as the caller's context).
-            //
-            // Returned tuple: (class_name_for_lookup, optional_obj_id_for_substitute_this).
-            // `None` for obj_id means "leave Expr::This alone".
+            //   - `Expr::PropertyGet { ... }` chain (e.g. `world.commandBuffer`):
+            //     resolved by walking the chain via `class_field_types`. The
+            //     simple-call path here can't materialize a setup-Let for the
+            //     receiver (it must produce a single Expr result with an
+            //     empty stmt list for the single-Return case), so we only
+            //     accept LocalGet/This shapes here. The richer
+            //     `try_inline_call` path (multi-stmt) handles PropertyGet
+            //     receivers by emitting a `Let __recv = <chain>` first.
             let receiver: Option<(String, Option<LocalId>)> = match object.as_ref() {
                 Expr::LocalGet(obj_id) => local_types
                     .get(obj_id)
@@ -2284,6 +2415,9 @@ fn try_inline_simple_call(
                 Expr::This => enclosing_class.map(|cn| (cn.to_string(), None)),
                 _ => None,
             };
+            // Silence unused-warning for the resolver helper when this
+            // simple path doesn't reach it. The richer path below uses it.
+            let _ = class_field_types;
             if let Some((class_name, obj_id_opt)) = receiver {
                 // Look up the method candidate
                 if let Some(method_candidate) =
@@ -2381,6 +2515,7 @@ fn try_inline_call(
     local_types: &HashMap<LocalId, String>,
     next_local_id: &mut LocalId,
     enclosing_class: Option<&str>,
+    class_field_types: &HashMap<(String, String), String>,
 ) -> Option<(Vec<Stmt>, Option<Expr>)> {
     if let Expr::Call { callee, args, .. } = expr {
         // Handle regular function calls
@@ -2434,11 +2569,37 @@ fn try_inline_call(
             property: method_name,
         } = callee.as_ref()
         {
-            // Resolve receiver class — see `try_inline_simple_call`'s
-            // matching code for the rationale. `obj_id_opt = None` indicates
-            // an `Expr::This` receiver where the body's `Expr::This` should
-            // stay unchanged (i.e. continue to refer to the caller's
-            // implicit `this`).
+            // Resolve receiver class. Three shapes are supported:
+            //   - `Expr::LocalGet(id)` whose static type is in `local_types`
+            //     (existing case, no setup needed).
+            //   - `Expr::This` (existing case, `Expr::This` in the body stays
+            //     unchanged because the caller's `this` already matches when
+            //     `enclosing_class` is set).
+            //   - Any other shape that `resolve_receiver_class` can resolve
+            //     (notably `PropertyGet { object: LocalGet(id), property: f }`
+            //     when `class_field_types` knows `(class_of_id, f) ->
+            //     field_class`). For these we materialize the receiver into
+            //     a fresh local via a setup `Let` and then drive
+            //     `substitute_this_in_stmts` against that local — without
+            //     materialization the body's `Expr::This` would reference the
+            //     CALLER's `this`, which is the wrong receiver class.
+            let mut setup_stmts: Vec<Stmt> = Vec::new();
+            // Receiver resolution: only LocalGet/This receivers are inlined.
+            // PropertyGet chains (e.g. `world.commandBuffer.set(...)`) are
+            // technically resolvable via `class_field_types`, but when we
+            // tried inlining them by materializing the chain into a fresh
+            // `Let __recv = world.commandBuffer` followed by a substituted
+            // body, sync-hotpath regressed from 57 → 86 ms and the whole
+            // perf-comprehensive table widened. The runtime
+            // js_native_call_method dispatch (with the IC) ends up cheaper
+            // at scale than the emitted alloca + store + load + inlined
+            // body — likely because of the shadow-frame tracking the
+            // `Named`-typed materialization triggers, and how LLVM ends up
+            // handling the larger inlined body under register pressure.
+            // Left as a follow-up; `class_field_types` is plumbed through
+            // and `resolve_receiver_class` is defined so the next attempt
+            // can swap in here without re-threading the signatures.
+            let _ = class_field_types;
             let receiver: Option<(String, Option<LocalId>)> = match object.as_ref() {
                 Expr::LocalGet(obj_id) => local_types
                     .get(obj_id)
@@ -2450,7 +2611,6 @@ fn try_inline_call(
                 if let Some(method_candidate) =
                     method_candidates.get(&(class_name, method_name.clone()))
                 {
-                    let mut setup_stmts: Vec<Stmt> = Vec::new();
                     let mut param_map: HashMap<LocalId, Expr> = HashMap::new();
 
                     // Map 'this' parameter to the receiver object (if present

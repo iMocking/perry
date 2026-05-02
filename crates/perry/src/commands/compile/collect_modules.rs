@@ -522,7 +522,28 @@ pub(super) fn collect_modules(
                 extra_methods.entry(k).or_insert(v);
             }
         }
-        inline_functions(&mut hir_module, &extra_methods);
+        // Cross-module field-type info: `(class_name, field_name) ->
+        // field_class_name`. Lets the inliner's `resolve_receiver_class`
+        // walk a chain like `world.commandBuffer.set(...)` — without it,
+        // the receiver match bails at the first PropertyGet and the call
+        // stays a runtime dispatch. Built from every prior module's
+        // class.fields where the type is `Named(...)`.
+        let mut extra_class_fields: std::collections::HashMap<
+            (String, String),
+            String,
+        > = std::collections::HashMap::new();
+        for prior_module in ctx.native_modules.values() {
+            for class in &prior_module.classes {
+                for f in &class.fields {
+                    if let perry_types::Type::Named(field_class) = &f.ty {
+                        extra_class_fields
+                            .entry((class.name.clone(), f.name.clone()))
+                            .or_insert_with(|| field_class.clone());
+                    }
+                }
+            }
+        }
+        inline_functions(&mut hir_module, &extra_methods, &extra_class_fields);
         transform_async_to_generator(&mut hir_module);
         transform_generators(&mut hir_module);
     }
