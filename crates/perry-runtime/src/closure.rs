@@ -13,7 +13,24 @@ thread_local! {
     /// See `js_closure_alloc_singleton` and `snapshot_singleton_closures`.
     static SINGLETON_CLOSURES: RefCell<HashMap<usize, *mut ClosureHeader>> =
         RefCell::new(HashMap::new());
+
+    /// Singleton cache for closures with captures, keyed by
+    /// `(func_ptr, capture_bits…)`. Hot ECS callbacks like the arrow in
+    /// `executeEntityCommands` capture `this._changeset` and re-run on
+    /// every command — the cache hits every iteration. Bounded at
+    /// `MAX_CAPTURED_CACHE_ENTRIES` so a pathological program can't grow
+    /// it unboundedly; once full, new closures take the slow allocator
+    /// path (still correct, just unmemoized).
+    static SINGLETON_CAPTURED_CLOSURES: RefCell<HashMap<(usize, Vec<u64>), *mut ClosureHeader>> =
+        RefCell::new(HashMap::new());
 }
+
+/// Cap on cached captured closures. Sized for the realistic ECS call-
+/// site count (a few hundred distinct (func, capture-tuple) keys); once
+/// reached, additional unique closures bypass the cache rather than
+/// crowding it. Picked to comfortably hold every callback the ECS
+/// benches construct without ever evicting.
+const MAX_CAPTURED_CACHE_ENTRIES: usize = 8192;
 
 /// Magic value stored in ClosureHeader._reserved to identify closures at runtime.
 /// Used by js_value_typeof to return "function" instead of "object" for closures.
@@ -111,8 +128,68 @@ pub extern "C" fn js_closure_alloc_singleton(func_ptr: *const u8) -> *mut Closur
 /// closure as soon as no live JSValue references it, even though emitted
 /// code keeps reaching for it via `js_closure_alloc_singleton`.
 pub fn snapshot_singleton_closures() -> Vec<*mut ClosureHeader> {
-    SINGLETON_CLOSURES.with(|s| s.borrow().values().copied().collect())
+    let mut out: Vec<*mut ClosureHeader> =
+        SINGLETON_CLOSURES.with(|s| s.borrow().values().copied().collect());
+    SINGLETON_CAPTURED_CLOSURES.with(|s| {
+        for &c in s.borrow().values() {
+            out.push(c);
+        }
+    });
+    out
 }
+
+/// Singleton-cached allocation for closures with captures, keyed by
+/// `(func_ptr, capture_bits…)`. When the same closure (same body, same
+/// capture values) is repeatedly created at a hot call site — typical
+/// for ECS callbacks capturing `this._changeset` — the cache returns
+/// the same `ClosureHeader` instead of going through `gc_malloc` and
+/// the GC trigger check on every iteration.
+///
+/// `captures_ptr` points at `capture_count` consecutive 8-byte values
+/// matching the layout `js_closure_set_capture_f64` writes.
+///
+/// Falls back to a fresh `js_closure_alloc` once the cache hits
+/// `MAX_CAPTURED_CACHE_ENTRIES` so a pathological program with many
+/// distinct (func, capture-tuple) keys can't grow it unboundedly.
+#[no_mangle]
+pub extern "C" fn js_closure_alloc_with_captures_singleton(
+    func_ptr: *const u8,
+    capture_count: u32,
+    captures_ptr: *const u64,
+) -> *mut ClosureHeader {
+    let n = real_capture_count(capture_count) as usize;
+    let captures_vec: Vec<u64> = if n == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(captures_ptr, n) }.to_vec()
+    };
+    let key = (func_ptr as usize, captures_vec);
+
+    if let Some(cached) =
+        SINGLETON_CAPTURED_CLOSURES.with(|s| s.borrow().get(&key).copied())
+    {
+        return cached;
+    }
+
+    // Slow path: allocate, populate captures, insert into cache.
+    let allocated = js_closure_alloc(func_ptr, capture_count);
+    if n > 0 && !captures_ptr.is_null() {
+        unsafe {
+            let dest = (allocated as *mut u8)
+                .add(std::mem::size_of::<ClosureHeader>())
+                as *mut u64;
+            std::ptr::copy_nonoverlapping(captures_ptr, dest, n);
+        }
+    }
+    SINGLETON_CAPTURED_CLOSURES.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.len() < MAX_CAPTURED_CACHE_ENTRIES {
+            s.insert(key, allocated);
+        }
+    });
+    allocated
+}
+
 
 /// Get the function pointer from a closure
 #[no_mangle]

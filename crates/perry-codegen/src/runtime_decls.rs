@@ -193,6 +193,14 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     // skipping gc_malloc + gc_check_trigger on the hot loop. See
     // `crates/perry-runtime/src/closure.rs::js_closure_alloc_singleton`.
     module.declare_function("js_closure_alloc_singleton", I64, &[PTR]);
+    // Singleton-cached variant for closures with captures, keyed by
+    // `(func_ptr, capture_bits…)`. Args: (func_ptr, capture_count,
+    // captures_ptr — pointer to `capture_count` u64 values).
+    module.declare_function(
+        "js_closure_alloc_with_captures_singleton",
+        I64,
+        &[PTR, I32, PTR],
+    );
     module.declare_function("js_closure_set_capture_f64", VOID, &[I64, I32, DOUBLE]);
     module.declare_function("js_closure_get_capture_f64", DOUBLE, &[I64, I32]);
     module.declare_function("js_closure_call0", DOUBLE, &[I64]);

@@ -3578,26 +3578,67 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             // Closures with NO captures (and no `this` to patch) are
             // observationally identical across every call site that
             // produces them, so route through `js_closure_alloc_singleton`
-            // to share a single ClosureHeader cached by func_ptr. This
-            // skips gc_malloc + gc_check_trigger on the hot path — the
-            // dominant cost when a non-capturing arrow is created
-            // per-iteration of a tight loop (witnessed via `sample`:
-            // `isDontFragmentRelation` → `js_closure_alloc` →
-            // `gc_collect_minor` was 7/11 samples in sync-hotpath).
-            let use_singleton = total_caps == 0;
-            let closure_handle = {
+            // to share a single ClosureHeader cached by func_ptr.
+            //
+            // Closures WITH captures route through
+            // `js_closure_alloc_with_captures_singleton` whenever none of
+            // those captures are mutated by the body (the common case
+            // for ECS callbacks like `(eid, arch, compId) => { ...
+            // changeset ... }` capturing `this._changeset`). The cache
+            // keys on (func_ptr, capture_bits…) so distinct capture
+            // values still produce distinct closures; identical
+            // (func, captures) at a hot call site re-uses the cached
+            // ClosureHeader and skips gc_malloc + gc_check_trigger.
+            //
+            // We skip the captured-singleton path for closures whose
+            // body mutates a capture (or that capture `this`, which we
+            // patch in-place after creation): both want fresh per-site
+            // identity.
+            let body_mutates_capture = !mutable_captures.is_empty()
+                && auto_captures
+                    .iter()
+                    .any(|id| mutable_captures.contains(id));
+            let no_capture_singleton = total_caps == 0;
+            let captured_singleton =
+                !no_capture_singleton && !*captures_this && !body_mutates_capture;
+
+            let closure_handle = if no_capture_singleton {
                 let blk = ctx.block();
-                if use_singleton {
-                    blk.call(I64, "js_closure_alloc_singleton", &[(PTR, &func_ref)])
-                } else {
-                    blk.call(
-                        I64,
-                        "js_closure_alloc",
-                        &[(PTR, &func_ref), (I32, &cap_count)],
-                    )
+                blk.call(I64, "js_closure_alloc_singleton", &[(PTR, &func_ref)])
+            } else if captured_singleton {
+                // Stack-allocate a `[u64; N]` capture buffer in the
+                // function entry block, populate it with the lowered
+                // capture values, then call the captured-singleton
+                // helper which copies them into the cached closure.
+                let n = captured_values.len();
+                let buf = ctx.func.alloca_entry_array(I64, n);
+                {
+                    let blk = ctx.block();
+                    for (i, v) in captured_values.iter().enumerate() {
+                        let slot = blk.gep(I64, &buf, &[(I64, &format!("{}", i))]);
+                        let v_bits = blk.bitcast_double_to_i64(v);
+                        blk.store(I64, &v_bits, &slot);
+                    }
                 }
+                let blk = ctx.block();
+                blk.call(
+                    I64,
+                    "js_closure_alloc_with_captures_singleton",
+                    &[(PTR, &func_ref), (I32, &cap_count), (PTR, &buf)],
+                )
+            } else {
+                let blk = ctx.block();
+                blk.call(
+                    I64,
+                    "js_closure_alloc",
+                    &[(PTR, &func_ref), (I32, &cap_count)],
+                )
             };
-            {
+
+            // The captured-singleton helper writes captures internally
+            // (so the cached layout matches a fresh allocation). The
+            // other paths still need explicit per-slot writes.
+            if !captured_singleton {
                 let blk = ctx.block();
                 for (idx, val) in captured_values.iter().enumerate() {
                     let idx_str = idx.to_string();
