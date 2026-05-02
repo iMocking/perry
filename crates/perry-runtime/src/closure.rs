@@ -14,23 +14,24 @@ thread_local! {
     static SINGLETON_CLOSURES: RefCell<HashMap<usize, *mut ClosureHeader>> =
         RefCell::new(HashMap::new());
 
-    /// Singleton cache for closures with captures, keyed by
-    /// `(func_ptr, capture_bits…)`. Hot ECS callbacks like the arrow in
-    /// `executeEntityCommands` capture `this._changeset` and re-run on
-    /// every command — the cache hits every iteration. Bounded at
-    /// `MAX_CAPTURED_CACHE_ENTRIES` so a pathological program can't grow
-    /// it unboundedly; once full, new closures take the slow allocator
-    /// path (still correct, just unmemoized).
-    static SINGLETON_CAPTURED_CLOSURES: RefCell<HashMap<(usize, Vec<u64>), *mut ClosureHeader>> =
+    /// Per-`func_ptr` single-slot cache for closures with captures.
+    /// Each value is `(last_captures, last_closure)` — when the same
+    /// closure literal is created again with the SAME capture bits,
+    /// we return the cached closure; otherwise we allocate a fresh
+    /// one and replace the slot.
+    ///
+    /// One entry per closure literal (bounded by the number of
+    /// `Expr::Closure` sites in the program), not per
+    /// `(func_ptr, capture-tuple)` pair — this prevents a closure
+    /// whose captures vary per call (e.g.
+    /// `getOrCompute(map, key, () => new Foo(sortedTypes))` capturing
+    /// a fresh array per call) from filling the cache and crowding
+    /// out closures with stable captures.
+    static SINGLETON_CAPTURED_CLOSURES: RefCell<HashMap<usize, (Vec<u64>, *mut ClosureHeader)>> =
         RefCell::new(HashMap::new());
 }
 
-/// Cap on cached captured closures. Sized for the realistic ECS call-
-/// site count (a few hundred distinct (func, capture-tuple) keys); once
-/// reached, additional unique closures bypass the cache rather than
-/// crowding it. Picked to comfortably hold every callback the ECS
-/// benches construct without ever evicting.
-const MAX_CAPTURED_CACHE_ENTRIES: usize = 8192;
+
 
 /// Magic value stored in ClosureHeader._reserved to identify closures at runtime.
 /// Used by js_value_typeof to return "function" instead of "object" for closures.
@@ -131,26 +132,25 @@ pub fn snapshot_singleton_closures() -> Vec<*mut ClosureHeader> {
     let mut out: Vec<*mut ClosureHeader> =
         SINGLETON_CLOSURES.with(|s| s.borrow().values().copied().collect());
     SINGLETON_CAPTURED_CLOSURES.with(|s| {
-        for &c in s.borrow().values() {
-            out.push(c);
+        for (_caps, c) in s.borrow().values() {
+            out.push(*c);
         }
     });
     out
 }
 
-/// Singleton-cached allocation for closures with captures, keyed by
-/// `(func_ptr, capture_bits…)`. When the same closure (same body, same
-/// capture values) is repeatedly created at a hot call site — typical
-/// for ECS callbacks capturing `this._changeset` — the cache returns
-/// the same `ClosureHeader` instead of going through `gc_malloc` and
-/// the GC trigger check on every iteration.
+/// Per-`func_ptr` single-slot cache for closures with captures. When
+/// the same closure literal is created again with the SAME capture
+/// bits, we return the cached closure; otherwise we allocate a fresh
+/// one and replace the slot.
 ///
 /// `captures_ptr` points at `capture_count` consecutive 8-byte values
 /// matching the layout `js_closure_set_capture_f64` writes.
 ///
-/// Falls back to a fresh `js_closure_alloc` once the cache hits
-/// `MAX_CAPTURED_CACHE_ENTRIES` so a pathological program with many
-/// distinct (func, capture-tuple) keys can't grow it unboundedly.
+/// One entry per closure literal (bounded by program size). Closures
+/// whose captures vary per call (e.g. `getOrCompute(map, key, () =>
+/// ...)` capturing a fresh array each call) miss every time but only
+/// occupy one slot, so they don't crowd out steady-state captures.
 #[no_mangle]
 pub extern "C" fn js_closure_alloc_with_captures_singleton(
     func_ptr: *const u8,
@@ -158,16 +158,25 @@ pub extern "C" fn js_closure_alloc_with_captures_singleton(
     captures_ptr: *const u64,
 ) -> *mut ClosureHeader {
     let n = real_capture_count(capture_count) as usize;
-    let captures_vec: Vec<u64> = if n == 0 {
-        Vec::new()
+    let captures_slice: &[u64] = if n == 0 || captures_ptr.is_null() {
+        &[]
     } else {
-        unsafe { std::slice::from_raw_parts(captures_ptr, n) }.to_vec()
+        unsafe { std::slice::from_raw_parts(captures_ptr, n) }
     };
-    let key = (func_ptr as usize, captures_vec);
 
-    if let Some(cached) =
-        SINGLETON_CAPTURED_CLOSURES.with(|s| s.borrow().get(&key).copied())
-    {
+    // Fast path: per-func-ptr single slot — if the cached captures
+    // match the new ones, return the cached closure. Avoids a HashMap
+    // allocation on the hot path.
+    if let Some(cached) = SINGLETON_CAPTURED_CLOSURES.with(|s| {
+        let s = s.borrow();
+        s.get(&(func_ptr as usize)).and_then(|(prev_caps, ptr)| {
+            if prev_caps.as_slice() == captures_slice {
+                Some(*ptr)
+            } else {
+                None
+            }
+        })
+    }) {
         return cached;
     }
 
@@ -182,10 +191,10 @@ pub extern "C" fn js_closure_alloc_with_captures_singleton(
         }
     }
     SINGLETON_CAPTURED_CLOSURES.with(|s| {
-        let mut s = s.borrow_mut();
-        if s.len() < MAX_CAPTURED_CACHE_ENTRIES {
-            s.insert(key, allocated);
-        }
+        s.borrow_mut().insert(
+            func_ptr as usize,
+            (captures_slice.to_vec(), allocated),
+        );
     });
     allocated
 }
