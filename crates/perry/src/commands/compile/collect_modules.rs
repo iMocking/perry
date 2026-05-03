@@ -444,7 +444,7 @@ pub(super) fn collect_modules(
             perry_hir::Export::Named { .. } => None,
         };
         if let Some(src) = source {
-            if let Some((resolved_path, kind)) = cached_resolve_import(src, &canonical, ctx) {
+            if let Some((resolved_path, kind)) = cached_resolve_import(src.as_str(), &canonical, ctx) {
                 match kind {
                     ModuleKind::NativeCompiled => {
                         collect_modules(
