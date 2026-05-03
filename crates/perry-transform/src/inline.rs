@@ -2689,6 +2689,23 @@ fn try_inline_call(
                     }
                 }
 
+                // Trailing optional/default params with no matching arg —
+                // see the matching block in the method-call branch below for
+                // the rationale. Without this, references to the unmatched
+                // param's source-side LocalId leak into the destination.
+                for param in func.params.iter().skip(args.len()) {
+                    let local_id = *next_local_id;
+                    *next_local_id += 1;
+                    setup_stmts.push(Stmt::Let {
+                        id: local_id,
+                        name: param.name.clone(),
+                        ty: param.ty.clone(),
+                        mutable: true,
+                        init: Some(Expr::Undefined),
+                    });
+                    param_map.insert(param.id, Expr::LocalGet(local_id));
+                }
+
                 let mut inlined_body = func.body.clone();
 
                 // Collect all LocalIds from Let statements in the body and remap them
@@ -2788,6 +2805,33 @@ fn try_inline_call(
 
                             param_map.insert(param.id, Expr::LocalGet(local_id));
                         }
+                    }
+
+                    // Trailing optional/default params with no matching arg:
+                    // allocate a fresh local for each so the param's source-
+                    // class LocalId doesn't leak into the destination scope
+                    // (where it can collide with an unrelated local — e.g.
+                    // `World.createQuery(componentTypes, filter = {})` called
+                    // with one arg leaves `filter`'s body refs unsubstituted,
+                    // and the `if (filter === undefined) filter = {}`
+                    // prologue then writes to whatever destination local
+                    // happens to share that id).
+                    for param in method_candidate
+                        .func
+                        .params
+                        .iter()
+                        .skip(args.len())
+                    {
+                        let local_id = *next_local_id;
+                        *next_local_id += 1;
+                        setup_stmts.push(Stmt::Let {
+                            id: local_id,
+                            name: param.name.clone(),
+                            ty: param.ty.clone(),
+                            mutable: true,
+                            init: Some(Expr::Undefined),
+                        });
+                        param_map.insert(param.id, Expr::LocalGet(local_id));
                     }
 
                     // Clone and substitute the method body
