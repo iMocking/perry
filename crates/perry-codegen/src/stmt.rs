@@ -16,8 +16,37 @@ use crate::types::{DOUBLE, I32, I64, I8, PTR};
 /// statement splits control flow, `ctx.current_block` is updated to the
 /// "fall-through" block after the split.
 pub(crate) fn lower_stmts(ctx: &mut FnCtx<'_>, stmts: &[Stmt]) -> Result<()> {
-    for s in stmts {
-        lower_stmt(ctx, s)?;
+    let mut i = 0;
+    while i < stmts.len() {
+        // Channel-reduction fusion: detect a length-3-or-4 sequence of
+        // `acc[c] += arr[idx + c] * k` accumulator updates and emit a
+        // single `<4 x i32>` SIMD multiply-add. The canonical hot shape
+        // is image_convolution's blur kernel inner body. Detection is
+        // narrow (consecutive integer offsets, identical array, identical
+        // factor, distinct integer-stable accumulators) so the fusion
+        // won't fire on shapes like `r += a[i]*k1; g += a[i]*k2;`
+        // (different factors) or `acc += a[i]*k1; acc += a[i+1]*k2;`
+        // (same accumulator).
+        //
+        // The fusion only fires when the array has a `buffer_data_slot`
+        // entry — without the pre-computed data ptr we'd have to derive
+        // it inline, which costs the same as the scalar Uint8ArrayGet
+        // and gives up the win.
+        if let Some(reduction) = crate::expr::try_match_channel_reduction(
+            stmts,
+            i,
+            ctx.integer_locals,
+        ) {
+            if ctx.buffer_data_slots.contains_key(&reduction.array_id) {
+                crate::expr::lower_channel_reduction(ctx, &reduction)?;
+                i += reduction.acc_ids.len();
+                if ctx.block().is_terminated() {
+                    break;
+                }
+                continue;
+            }
+        }
+        lower_stmt(ctx, &stmts[i])?;
         // If an earlier statement already terminated the current block
         // (e.g. return in a straight-line sequence), any following statement
         // would emit dead code. Anvil silently drops these at the block
@@ -25,6 +54,7 @@ pub(crate) fn lower_stmts(ctx: &mut FnCtx<'_>, stmts: &[Stmt]) -> Result<()> {
         if ctx.block().is_terminated() {
             break;
         }
+        i += 1;
     }
     Ok(())
 }

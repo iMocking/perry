@@ -1502,8 +1502,18 @@ fn collect_extra_integer_let_ids(
     for s in stmts {
         match s {
             Stmt::Let { id, init: Some(init), .. } => {
-                if !out.contains(id)
-                    && is_int32_producing_expr(init, out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids)
+                // Same `>>> 0` exclusion as the syntactic seed in
+                // `collect_integer_let_ids`: u32 values can't round-trip
+                // through an i32 slot.
+                if !is_ushr_zero(init)
+                    && !out.contains(id)
+                    && is_int32_producing_expr(
+                        init,
+                        out,
+                        flat_const_ids,
+                        flat_row_alias_ids,
+                        clamp_fn_ids,
+                    )
                 {
                     out.insert(*id);
                 }
@@ -1705,6 +1715,19 @@ fn is_flat_const_indexget(
 /// these always produce an int32 result. Used by `collect_integer_let_ids` to
 /// seed const Lets whose init is e.g. `(h >>> 16) & 0xffff` (inlined imul32
 /// body variables).
+/// Return `true` if `e` is the specific `(expr) >>> 0` shape — i.e. an
+/// unsigned right-shift by zero, which JS uses as a u32 cast. Used to
+/// gate the immutable-bitwise-init seed in `collect_integer_let_ids`
+/// against u32 results that can't round-trip through a signed i32 slot.
+fn is_ushr_zero(e: &perry_hir::Expr) -> bool {
+    use perry_hir::{BinaryOp, Expr};
+    matches!(
+        e,
+        Expr::Binary { op: BinaryOp::UShr, right, .. }
+            if matches!(right.as_ref(), Expr::Integer(0))
+    )
+}
+
 fn is_bitwise_expr(e: &perry_hir::Expr) -> bool {
     use perry_hir::{BinaryOp, Expr};
     matches!(
@@ -1739,10 +1762,19 @@ fn collect_integer_let_ids(
             } if matches!(init, Expr::Integer(_))
                     || is_flat_const_indexget(init, flat_const_ids, flat_row_alias_ids)
                     || is_clamp_call(init, clamp_fn_ids)
-                    // Seed immutable (const) Lets whose init is a bitwise expression.
-                    // Bitwise ops always produce int32 per JS spec. Safe for const
-                    // because they never get i32 counter slots (only mutable locals do).
-                    || (!mutable && is_bitwise_expr(init))
+                    // Seed immutable (const) Lets whose init is a bitwise expression
+                    // — EXCEPT `>>> 0`, whose result is u32 (range 0..2^32-1) and
+                    // can't round-trip through a signed i32 slot. Pre-v0.5.x this
+                    // wasn't a hazard because immutable lets never got an i32
+                    // shadow (the `*mutable` gate kept them off); after dropping
+                    // that gate (4f895dd8 — needed for `const row = yy * W` to
+                    // chain through i32), `const hash = h >>> 0` would get an
+                    // i32 slot and `hash.toString(16)` would print the negative
+                    // form (e.g. `-2886948b` instead of `2ba2e053` on
+                    // image_conv's FNV-1a checksum). Excluding the `>>> 0`
+                    // shape from the seed keeps `hash` at double-only and
+                    // preserves the unsigned semantics.
+                    || (!mutable && is_bitwise_expr(init) && !is_ushr_zero(init))
                     // Seed mutable Lets with `(expr) | 0` init — `| 0` produces
                     // a signed 32-bit integer that fits cleanly in an i32 slot.
                     // `>>> 0` is intentionally NOT seeded here: `>>> 0` produces
@@ -2758,6 +2790,17 @@ fn returns_int_stmts(ss: &[Stmt]) -> bool {
 fn returns_int_expr(e: &Expr) -> bool {
     match e {
         Expr::Integer(_) => true,
+        // `>>> 0` produces u32, not a signed i32 — caller paths that
+        // feed this through an i32 slot (`integer_locals` propagation,
+        // i32-init fast path on Lets) sign-extend the high bit and
+        // print the negative form via `toString(16)`. Exclude UShr
+        // here so functions ending in `return h >>> 0` (FNV-1a hashes,
+        // CRC, etc.) stay outside `returns_int_functions` and force
+        // their callers onto the f64 result path.
+        //
+        // Other bitwise ops (BitAnd / BitOr / BitXor / Shl / Shr) all
+        // produce SIGNED i32 per JS spec — safe to round-trip through
+        // an i32 slot.
         Expr::Binary { op, .. } => matches!(
             op,
             BinaryOp::BitAnd
@@ -2765,7 +2808,6 @@ fn returns_int_expr(e: &Expr) -> bool {
                 | BinaryOp::BitXor
                 | BinaryOp::Shl
                 | BinaryOp::Shr
-                | BinaryOp::UShr
         ),
         Expr::MathImul(_, _) => true,
         _ => false,
