@@ -1433,6 +1433,30 @@ pub(crate) fn collect_integer_locals(
         clamp_fn_ids,
     );
 
+    // Forward closure pass: extend the seed set with Lets whose init is
+    // `is_int32_producing_expr` against the current candidate set.
+    // The initial `collect_integer_let_ids` only seeds on syntactic
+    // patterns (Integer literals, `(expr) | 0`, clamp calls, …) but
+    // misses transitive int-stable Lets like `const hi = W - 1` where
+    // `W` is itself a candidate. Iterate to a fixed point so chains
+    // such as `const W = 3840` → `const hi = W - 1` → uses-of-hi
+    // propagate cleanly.
+    //
+    // image_convolution's clampIdx-inlined `xx`/`yy` rely on this:
+    // their write-set includes `LocalSet(xx, LocalGet(hi))`, and
+    // without `hi` in the int-stable set the disqualifier marks the
+    // assignment as non-int-producing and removes `xx`/`yy` from the
+    // set — taking down the i32 shadow on every downstream use of
+    // `idx = (row + xx) * 3` and forcing the inner kernel's address
+    // generation back into double.
+    loop {
+        let before = candidates.len();
+        collect_extra_integer_let_ids(stmts, &mut candidates, flat_const_ids, &flat_row_alias_ids, clamp_fn_ids);
+        if candidates.len() == before {
+            break;
+        }
+    }
+
     // Iterate to a fixed point (issue #49): `is_int32_producing_expr` now
     // recognizes `LocalGet(id)` as int-producing when `id` is itself
     // int-stable, and `Add/Sub/Mul` as int-producing when both operands
@@ -1457,6 +1481,68 @@ pub(crate) fn collect_integer_locals(
         }
     }
     candidates
+}
+
+/// Walk all `Stmt::Let { id, init: Some(e), .. }` and add `id` to
+/// `out` when `e` is `is_int32_producing_expr` against the *current*
+/// `out` set. Used by `collect_integer_locals` to take the
+/// syntactic seed set's transitive closure: e.g. `const W = 3840` is
+/// seeded on the initial pass, then `const hi = W - 1` lands here on
+/// the second pass because `W` is already in the set, and any Let
+/// whose init reduces to `is_int32_producing_expr` over `hi` lands
+/// on the third pass.
+fn collect_extra_integer_let_ids(
+    stmts: &[perry_hir::Stmt],
+    out: &mut HashSet<u32>,
+    flat_const_ids: &HashSet<u32>,
+    flat_row_alias_ids: &HashSet<u32>,
+    clamp_fn_ids: &HashSet<u32>,
+) {
+    use perry_hir::Stmt;
+    for s in stmts {
+        match s {
+            Stmt::Let { id, init: Some(init), .. } => {
+                if !out.contains(id)
+                    && is_int32_producing_expr(init, out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids)
+                {
+                    out.insert(*id);
+                }
+            }
+            Stmt::If { then_branch, else_branch, .. } => {
+                collect_extra_integer_let_ids(then_branch, out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
+                if let Some(eb) = else_branch {
+                    collect_extra_integer_let_ids(eb, out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
+                }
+            }
+            Stmt::For { init, body, .. } => {
+                if let Some(init_stmt) = init {
+                    collect_extra_integer_let_ids(std::slice::from_ref(init_stmt), out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
+                }
+                collect_extra_integer_let_ids(body, out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
+            }
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
+                collect_extra_integer_let_ids(body, out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
+            }
+            Stmt::Try { body, catch, finally } => {
+                collect_extra_integer_let_ids(body, out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
+                if let Some(c) = catch {
+                    collect_extra_integer_let_ids(&c.body, out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
+                }
+                if let Some(f) = finally {
+                    collect_extra_integer_let_ids(f, out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
+                }
+            }
+            Stmt::Switch { cases, .. } => {
+                for c in cases {
+                    collect_extra_integer_let_ids(&c.body, out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
+                }
+            }
+            Stmt::Labeled { body, .. } => {
+                collect_extra_integer_let_ids(std::slice::from_ref(body.as_ref()), out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn collect_flat_row_aliases(
@@ -1666,7 +1752,24 @@ fn collect_integer_let_ids(
                     // i32-slot write goes through `lower_expr_as_i32` +
                     // `sitofp` and loses the high bit (e.g. `-1 >>> 0` should
                     // be 4294967295 but the i32 slot reads back as -1).
-                    || (*mutable && matches!(init, Expr::Binary { op: perry_hir::BinaryOp::BitOr, right, .. } if matches!(right.as_ref(), Expr::Integer(0)))) =>
+                    || (*mutable && matches!(init, Expr::Binary { op: perry_hir::BinaryOp::BitOr, right, .. } if matches!(right.as_ref(), Expr::Integer(0))))
+                    // Seed mutable Lets with `init: Undefined` — the HIR
+                    // lowering emits this shape for locals that get their
+                    // first real value from a subsequent DoWhile or If
+                    // body (the clampIdx inline expansion is the canonical
+                    // case: `let xx = clampIdx(x+kx, 0, W-1)` becomes
+                    // `let xx = undefined; do { ...if/else writes to
+                    // xx... } while (false)`). Seed optimistically so
+                    // the disqualifier's int-stable check can run on the
+                    // actual writes; if any non-int write exists, the
+                    // fixed-point pass removes xx from the candidate
+                    // set. Without this seed, integer-valued clamp
+                    // results stay double through the rest of the
+                    // function — image_convolution's `idx = (row + xx)
+                    // * 3` then computes in DOUBLE because xx is
+                    // double, blocking i32 arithmetic on the inner
+                    // kernel's address generation.
+                    || (*mutable && matches!(init, Expr::Undefined)) =>
             {
                 out.insert(*id);
             }
