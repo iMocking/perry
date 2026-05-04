@@ -94,8 +94,22 @@ fn str_from_header(ptr: *const u8) -> &'static str {
     }
 }
 
+/// Check if a f64 value is a NaN-boxed string (STRING_TAG = 0x7FFF).
+fn is_nanboxed_string(value: f64) -> bool {
+    let bits = value.to_bits();
+    (bits >> 48) == 0x7FFF
+}
+
+/// Extract the string content from a NaN-boxed string value.
+fn extract_nanboxed_string(value: f64) -> String {
+    let ptr = unsafe { js_nanbox_get_pointer(value) } as *const u8;
+    str_from_header(ptr).to_string()
+}
+
 fn format_value(value: f64) -> String {
-    if value.fract() == 0.0 && value.abs() < 1e15 {
+    if is_nanboxed_string(value) {
+        extract_nanboxed_string(value)
+    } else if value.fract() == 0.0 && value.abs() < 1e15 {
         format!("{}", value as i64)
     } else {
         format!("{}", value)
