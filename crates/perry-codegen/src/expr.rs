@@ -3805,7 +3805,21 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             };
 
             let func_ref = format!("@{}", func_name);
-            let cap_count = total_caps.to_string();
+            // Issue #450: when `captures_this`, OR in the runtime's
+            // `CAPTURES_THIS_FLAG` (0x8000_0000) so the runtime can detect
+            // closures whose last capture slot is the reserved `this` slot.
+            // `js_closure_alloc` masks the flag off when computing allocation
+            // size (real_capture_count) but preserves it in the stored
+            // `capture_count` field. Used by `clone_closure_rebind_this` at
+            // `Object.defineProperty(obj, k, { get(){}, set(){} })` time so
+            // accessor invocation sees `this === obj` per spec, and by
+            // `js_closure_unbind_this` for detached method references.
+            let cap_count_val = if *captures_this {
+                (total_caps as u32) | 0x8000_0000u32
+            } else {
+                total_caps as u32
+            };
+            let cap_count = cap_count_val.to_string();
             // Closures with NO captures (and no `this` to patch) are
             // observationally identical across every call site that
             // produces them, so route through `js_closure_alloc_singleton`

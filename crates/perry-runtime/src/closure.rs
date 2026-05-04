@@ -1461,6 +1461,65 @@ pub extern "C" fn js_closure_unbind_this(val: f64) -> f64 {
     }
 }
 
+/// Issue #450: clone an accessor closure (from `Object.defineProperty(obj, k, { get, set })`)
+/// and patch its reserved `this` slot with `recv_box` (the NaN-boxed target object pointer).
+///
+/// The user's descriptor object literal's `{ get() {...}, set() {...} }` methods are codegen'd
+/// with `captures_this: true` — at object-literal construction the codegen patches their
+/// reserved `this` slot to point to the *descriptor* object. But spec says the getter/setter
+/// runs with `this === obj` (the property access target, NOT the descriptor). So we clone
+/// the closure once at defineProperty time and rebind `this` to `obj`. The original
+/// descriptor closure is untouched (in case the user reuses it).
+///
+/// `closure_bits` is the NaN-boxed closure value (POINTER_TAG | ptr); `recv_box` is the
+/// NaN-boxed target receiver (POINTER_TAG | obj). Returns the new closure as NaN-boxed bits,
+/// or returns `closure_bits` unchanged if the input isn't a CAPTURES_THIS closure.
+///
+/// Reserved `this` slot index is `auto_captures.len()` per the codegen convention
+/// (`crates/perry-codegen/src/expr.rs::lower_object_literal` and
+/// `crates/perry-runtime/src/symbol.rs::js_object_set_symbol_method` — both use the LAST
+/// capture slot, i.e. `real_count - 1`, as the `this` slot for `captures_this` closures).
+pub(crate) fn clone_closure_rebind_this(closure_bits: u64, recv_box: f64) -> u64 {
+    let tag = closure_bits & 0xFFFF_0000_0000_0000;
+    if tag != 0x7FFD_0000_0000_0000 {
+        return closure_bits;
+    }
+    let ptr = (closure_bits & 0x0000_FFFF_FFFF_FFFF) as usize;
+    if ptr < 0x10000 {
+        return closure_bits;
+    }
+    unsafe {
+        let type_tag = std::ptr::read_volatile((ptr as *const u8).add(12) as *const u32);
+        if type_tag != CLOSURE_MAGIC {
+            return closure_bits;
+        }
+        let header = ptr as *const ClosureHeader;
+        let raw_count = (*header).capture_count;
+        // No CAPTURES_THIS_FLAG → the closure body doesn't read `this`, no rebind needed.
+        if raw_count & CAPTURES_THIS_FLAG == 0 {
+            return closure_bits;
+        }
+        let count = real_capture_count(raw_count) as usize;
+        if count == 0 {
+            return closure_bits;
+        }
+        // Allocate a fresh closure with the same func_ptr + capture_count (preserving the flag).
+        let new_closure = js_closure_alloc((*header).func_ptr, raw_count);
+        let src_captures =
+            (ptr as *const u8).add(std::mem::size_of::<ClosureHeader>()) as *const f64;
+        let dst_captures =
+            (new_closure as *mut u8).add(std::mem::size_of::<ClosureHeader>()) as *mut f64;
+        // Copy every capture verbatim, then overwrite the `this` slot (last) with recv_box.
+        for i in 0..count {
+            *dst_captures.add(i) = *src_captures.add(i);
+        }
+        let this_slot = count - 1;
+        *dst_captures.add(this_slot) = recv_box;
+        let new_ptr = new_closure as u64;
+        0x7FFD_0000_0000_0000 | (new_ptr & 0x0000_FFFF_FFFF_FFFF)
+    }
+}
+
 /// Adapter for V8's `native_callback_trampoline` (perry-jsruntime).
 ///
 /// `js_create_callback(func_ptr, closure_env, param_count)` registers a JS

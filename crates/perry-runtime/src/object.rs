@@ -5590,15 +5590,26 @@ pub extern "C" fn js_object_define_property(
             // keys) can see it.
             ensure_key_in_keys_array(obj, key_str);
             if let Some(k) = key_rust.clone() {
+                // Issue #450: spec says the getter/setter runs with `this === obj`
+                // (the property access target). The user's descriptor literal
+                // `{ get() {...}, set() {...} }` was lowered with `captures_this: true`
+                // and had its reserved `this` slot patched to point to the *descriptor*
+                // object at construction time — that's what every other object-literal
+                // method does. Clone the closure once at defineProperty time and
+                // rebind `this` to `obj`, so every subsequent get/set call sees the
+                // correct receiver. Closures without CAPTURES_THIS_FLAG (e.g. arrow-form
+                // `get: () => this._backing` written as a field rather than a method
+                // shorthand) pass through unchanged.
+                let recv_box = crate::value::js_nanbox_pointer(obj as i64);
                 let get_bits = if get_field.is_undefined() {
                     0u64
                 } else {
-                    get_field.bits()
+                    crate::closure::clone_closure_rebind_this(get_field.bits(), recv_box)
                 };
                 let set_bits = if set_field.is_undefined() {
                     0u64
                 } else {
-                    set_field.bits()
+                    crate::closure::clone_closure_rebind_this(set_field.bits(), recv_box)
                 };
                 set_accessor_descriptor(
                     obj as usize,
