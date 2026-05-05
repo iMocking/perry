@@ -1941,6 +1941,15 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
                 (DOUBLE, "%a4".to_string()),
             ],
         );
+        // Fix #420 (v0.5.576): internal linkage so multi-module
+        // programs (drizzle-orm has 5+ modules each emitting this
+        // fallback) don't fail link with `duplicate symbol
+        // ___perry_wrap_perry_unknown_func`. Same pattern as the
+        // `__perry_wrap_extern_*` wrappers below — comment block at
+        // line ~1957 explicitly calls out that wrappers like this
+        // should be `internal` linkage so each module gets its own
+        // dead-code-eliminable copy.
+        wf.linkage = "internal".to_string();
         let _ = wf.create_block("entry");
         let blk = wf.block_mut(0).unwrap();
         // f64::from_bits(0x7FFC_0000_0000_0001) — TAG_UNDEFINED. Format

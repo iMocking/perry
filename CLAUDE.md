@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.575
+**Current Version:** 0.5.576
 
 
 ## TypeScript Parity Status
@@ -152,6 +152,8 @@ First-resolved directory cached in `compile_package_dirs`; subsequent imports re
 ## Recent Changes
 
 One-liners only — full detail in CHANGELOG.md.
+
+- **v0.5.576** — Refs #420 (compile drizzle-orm end-to-end shake-out batch 1 — duplicate-symbol fix on `__perry_wrap_perry_unknown_func`): the v0.5.337 fallback wrapper for unresolvable `Expr::FuncRef` ids was emitted with default (external) linkage, so multi-module programs (drizzle-orm has 5+ modules each emitting it) failed link with `duplicate symbol ___perry_wrap_perry_unknown_func`. Flipped to `internal` linkage matching the surrounding `__perry_wrap_extern_*` wrappers (their comment block explicitly calls out the same pattern). End-to-end smoke verified: `import { pgTable, serial, text, integer } from 'drizzle-orm/pg-core'` compiles and runs through to schema construction. Followups under #420 / #421: hono full dispatch chain still doesn't fire route handlers (separate, deeper bug — class-private-fields + closure-call in `compose()` / `RegExpRouter`); drizzle query execution against a real postgres needs perry-ext-pg integration smoke-test.
 
 - **v0.5.575** — Refs #421 (compile hono end-to-end shake-out batch 2 — `new Response(body, optsVar)` runtime-options extraction): perry's `new Response(body, init)` codegen in `crates/perry-codegen/src/lower_call/builtin.rs` only inspected `init` when it was a literal object expression (`{ status: 404 }`). Hono's `c.text("404 Not Found", 404)` flows through `#newResponse(text, arg, headers)` which builds `{ status, headers }` as a runtime object inside the framework and passes it to `new Response(...)` — perry then dropped the status entirely (defaulted to 200 / no headers) and downstream `res.status` reads were undefined. Fixed by extracting `.status` / `.statusText` / `.headers` at runtime via `js_object_get_field_by_name_f64` whenever `args[1]` isn't an object literal (object-literal short circuit preserved). Bare-construction tests round-trip status / statusText correctly. Hono's full dispatch chain still doesn't fire route handlers (separate bug, tracked under #421 — likely class-private-fields + closure-call in compose() / RegExpRouter) — not blocking this commit since the runtime-options path is a real fix that benefits any framework / library using the same pattern.
 
