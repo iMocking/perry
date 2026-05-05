@@ -1638,6 +1638,51 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         }
     }
 
+    // Closes #461: emit an undefined-returning stub for every named export
+    // that doesn't already have a `perry_fn_<modprefix>__<exported>` symbol.
+    // The cross-module call site resolves any namespace property access to
+    // `perry_fn_<src>__<name>` (lower_call.rs::ExternFuncRef path) — that
+    // works for value exports because either the function body itself or
+    // the variable getter at line 1099 claims the symbol. It does NOT work
+    // for:
+    //   * exported classes — `export class Union` produces method/keys
+    //     symbols but no function-shaped getter, so `AST.Union` from a
+    //     consumer link-fails on `_perry_fn_<SchemaAST>__Union`;
+    //   * exported interfaces / type aliases — `export interface Order`
+    //     is type-only at runtime, but type annotations like
+    //     `order.Order<...>` leak into the value-position symbol resolver
+    //     and link-fail on `_perry_fn_<Order_ts>__Order`.
+    // The stub returns NaN-boxed undefined; that matches the consumer-side
+    // no-op wrapper at line 1955 (which already returns undefined for
+    // imported classes referenced as values) so the link- and runtime-
+    // visible behavior of cross-module class/type references is symmetric.
+    {
+        use std::collections::HashSet;
+        let mut emitted_stubs: HashSet<String> = HashSet::new();
+        let stub_targets: Vec<String> = hir
+            .exports
+            .iter()
+            .filter_map(|e| match e {
+                perry_hir::Export::Named { exported, .. } => Some(exported.clone()),
+                _ => None,
+            })
+            .collect();
+        for exported in stub_targets {
+            let stub_sym = format!("perry_fn_{}__{}", module_prefix, sanitize(&exported));
+            if llmod.has_function(&stub_sym) {
+                continue;
+            }
+            if !emitted_stubs.insert(stub_sym.clone()) {
+                continue;
+            }
+            let wf = llmod.define_function(&stub_sym, DOUBLE, vec![]);
+            let _ = wf.create_block("entry");
+            let blk = wf.block_mut(0).unwrap();
+            let undef = crate::nanbox::double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED));
+            blk.ret(DOUBLE, &undef);
+        }
+    }
+
     // Lower each closure body as a top-level LLVM function.
     for (func_id, closure_expr) in &closures {
         compile_closure(
