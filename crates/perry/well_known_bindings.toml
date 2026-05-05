@@ -184,6 +184,11 @@ crate = "perry-ext-ioredis"
 lib = "perry_ext_ioredis"
 tracking = "#466"
 
+[bindings.pg]
+crate = "perry-ext-pg"
+lib = "perry_ext_pg"
+tracking = "#466"
+
 [bindings.nodemailer]
 crate = "perry-ext-nodemailer"
 lib = "perry_ext_nodemailer"

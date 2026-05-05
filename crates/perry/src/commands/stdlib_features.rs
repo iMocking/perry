@@ -40,7 +40,10 @@ pub fn module_to_features(module: &str) -> &'static [&'static str] {
 
         // ── Databases ─────────────────────────────────────────────────
         "mysql2" | "mysql2/promise" => &["database-mysql"],
-        "pg" => &["database-postgres"],
+        // `database-postgres` umbrella retained for backwards-compat;
+        // per-binding gate is `bundled-pg` (v0.5.566) so the
+        // well-known flip can route to perry-ext-pg.
+        "pg" => &["bundled-pg"],
         "better-sqlite3" => &["database-sqlite"],
         // tursodb (#424) lives in the external
         // `PerryTS/tursodb-bindings` repo (`bun add @perryts/tursodb`)

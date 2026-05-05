@@ -151,6 +151,7 @@ pub(super) fn build_optimized_libs(
                         | "bundled-argon2"
                         | "bundled-nodemailer"
                         | "bundled-ioredis"
+                        | "bundled-pg"
                 )
             }) {
                 features.insert("async-runtime");
