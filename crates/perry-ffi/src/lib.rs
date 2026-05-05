@@ -70,6 +70,9 @@ pub use bigint::{alloc_bigint_from_str, read_bigint_limbs, BigIntHeader, BIGINT_
 mod buffer;
 pub use buffer::{alloc_buffer, read_buffer_bytes, BufferHeader};
 
+mod json;
+pub use json::json_stringify;
+
 use perry_runtime::js_string_from_bytes;
 pub use perry_runtime::StringHeader;
 
