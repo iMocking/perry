@@ -230,9 +230,9 @@ pub mod zlib;
 pub use zlib::*;
 
 // === Email ===
-#[cfg(feature = "email")]
+#[cfg(feature = "bundled-nodemailer")]
 pub mod nodemailer;
-#[cfg(feature = "email")]
+#[cfg(feature = "bundled-nodemailer")]
 pub use nodemailer::*;
 
 // === Image Processing ===

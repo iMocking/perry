@@ -84,7 +84,9 @@ pub fn module_to_features(module: &str) -> &'static [&'static str] {
         "zlib" => &["compression"],
 
         // ── Email (lettre) ────────────────────────────────────────────
-        "nodemailer" => &["email"],
+        // `email` umbrella retained for backwards-compat; per-binding
+        // gate is `bundled-nodemailer` (v0.5.558).
+        "nodemailer" => &["bundled-nodemailer"],
 
         // ── Image processing (sharp) ──────────────────────────────────
         // `image` umbrella retained for backwards-compat;

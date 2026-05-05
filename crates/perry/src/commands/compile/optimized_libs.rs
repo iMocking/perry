@@ -147,7 +147,7 @@ pub(super) fn build_optimized_libs(
             if original_features.iter().any(|f| {
                 matches!(
                     *f,
-                    "bundled-bcrypt" | "bundled-argon2"
+                    "bundled-bcrypt" | "bundled-argon2" | "bundled-nodemailer"
                 )
             }) {
                 features.insert("async-runtime");

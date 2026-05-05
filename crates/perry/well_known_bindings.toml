@@ -163,3 +163,8 @@ tracking = "#466"
 crate = "perry-ext-ethers"
 lib = "perry_ext_ethers"
 tracking = "#466"
+
+[bindings.nodemailer]
+crate = "perry-ext-nodemailer"
+lib = "perry_ext_nodemailer"
+tracking = "#466"

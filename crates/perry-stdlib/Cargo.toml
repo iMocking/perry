@@ -111,8 +111,11 @@ bundled-ethers = []
 # Compression (zlib)
 compression = ["dep:flate2"]
 
-# Email (nodemailer)
-email = ["dep:lettre", "async-runtime"]
+# Email (nodemailer) — `email` umbrella retained for
+# backwards-compat; v0.5.558's well-known flip toggles
+# `bundled-nodemailer` instead.
+email = ["bundled-nodemailer"]
+bundled-nodemailer = ["dep:lettre", "async-runtime"]
 
 # Image processing (sharp) — `image` umbrella stays for
 # backwards-compat; v0.5.551's well-known flip toggles
