@@ -94,15 +94,20 @@ fn str_from_header(ptr: *const u8) -> &'static str {
     }
 }
 
-/// Check if a f64 value is a NaN-boxed string (STRING_TAG = 0x7FFF).
+/// Check if a f64 value is a NaN-boxed string. Accepts heap
+/// `STRING_TAG` (0x7FFF) and inline SSO `SHORT_STRING_TAG` (0x7FF9).
 fn is_nanboxed_string(value: f64) -> bool {
-    let bits = value.to_bits();
-    (bits >> 48) == 0x7FFF
+    let tag = value.to_bits() >> 48;
+    tag == 0x7FFF || tag == 0x7FF9
 }
 
-/// Extract the string content from a NaN-boxed string value.
+/// Extract the string content from a NaN-boxed string value. Routes
+/// through `js_get_string_pointer_unified` so SSO inline strings get
+/// materialized to a heap StringHeader instead of being misread as a
+/// pointer (the SSO payload bytes look like a bogus address to
+/// `js_nanbox_get_pointer`).
 fn extract_nanboxed_string(value: f64) -> String {
-    let ptr = unsafe { js_nanbox_get_pointer(value) } as *const u8;
+    let ptr = unsafe { js_get_string_pointer_unified(value) };
     str_from_header(ptr).to_string()
 }
 
