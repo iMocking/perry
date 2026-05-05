@@ -69,8 +69,9 @@
 //! than LLVM constant-folding can claw back.
 
 use perry_hir::walker::{walk_expr_children, walk_expr_children_mut};
-use perry_hir::{CompareOp, Expr, Module, Stmt, UpdateOp};
-use perry_types::LocalId;
+use perry_hir::{CallArg, CompareOp, Expr, Module, Stmt, UpdateOp};
+use perry_types::{FuncId, LocalId};
+use std::collections::HashMap;
 
 /// Maximum trip count we'll fully unroll. 8 covers the canonical
 /// image-kernel shapes (3×3, 5×5, 7×7) without blowing up code size.
@@ -88,14 +89,34 @@ const MAX_TRIP_COUNT: i64 = 8;
 /// inline at module level, not inside a function, so the flag must travel
 /// with module.init.
 pub fn unroll_static_loops(module: &mut Module) {
+    // Allocators for fresh LocalIds and FuncIds handed out per unrolled
+    // iteration. Each cloned body needs its declarations (Stmt::Let,
+    // Closure params, CatchClause::param) AND any cloned `Expr::Closure`s'
+    // `func_id` renamed so the N copies don't alias each other — see
+    // `refresh_local_ids` and #456. (Two closures with the same FuncId
+    // collapse to one compiled function in codegen, which would make every
+    // unrolled iteration's `() => captured` read the same global.)
+    let mut next_local_id = compute_max_local_id(module).saturating_add(1);
+    let mut next_func_id = compute_max_func_id(module).saturating_add(1);
+
     let mut init_changed = false;
-    unroll_in_stmts(&mut module.init, &mut init_changed);
+    unroll_in_stmts(
+        &mut module.init,
+        &mut init_changed,
+        &mut next_local_id,
+        &mut next_func_id,
+    );
     if init_changed {
         module.init_was_unrolled = true;
     }
     for f in &mut module.functions {
         let mut changed = false;
-        unroll_in_stmts(&mut f.body, &mut changed);
+        unroll_in_stmts(
+            &mut f.body,
+            &mut changed,
+            &mut next_local_id,
+            &mut next_func_id,
+        );
         if changed {
             f.was_unrolled = true;
         }
@@ -103,28 +124,48 @@ pub fn unroll_static_loops(module: &mut Module) {
     for c in &mut module.classes {
         if let Some(ctor) = &mut c.constructor {
             let mut changed = false;
-            unroll_in_stmts(&mut ctor.body, &mut changed);
+            unroll_in_stmts(
+                &mut ctor.body,
+                &mut changed,
+                &mut next_local_id,
+                &mut next_func_id,
+            );
             if changed {
                 ctor.was_unrolled = true;
             }
         }
         for m in &mut c.methods {
             let mut changed = false;
-            unroll_in_stmts(&mut m.body, &mut changed);
+            unroll_in_stmts(
+                &mut m.body,
+                &mut changed,
+                &mut next_local_id,
+                &mut next_func_id,
+            );
             if changed {
                 m.was_unrolled = true;
             }
         }
         for (_name, g) in &mut c.getters {
             let mut changed = false;
-            unroll_in_stmts(&mut g.body, &mut changed);
+            unroll_in_stmts(
+                &mut g.body,
+                &mut changed,
+                &mut next_local_id,
+                &mut next_func_id,
+            );
             if changed {
                 g.was_unrolled = true;
             }
         }
         for (_name, s) in &mut c.setters {
             let mut changed = false;
-            unroll_in_stmts(&mut s.body, &mut changed);
+            unroll_in_stmts(
+                &mut s.body,
+                &mut changed,
+                &mut next_local_id,
+                &mut next_func_id,
+            );
             if changed {
                 s.was_unrolled = true;
             }
@@ -147,7 +188,12 @@ pub fn unroll_static_loops(module: &mut Module) {
 /// recursively inside its children) gets unrolled. The caller uses this
 /// to mark the enclosing Function's `was_unrolled` flag so codegen can
 /// disable the channel-vector SIMD reduction in unrolled bodies.
-fn unroll_in_stmts(stmts: &mut Vec<Stmt>, changed: &mut bool) {
+fn unroll_in_stmts(
+    stmts: &mut Vec<Stmt>,
+    changed: &mut bool,
+    next_local_id: &mut LocalId,
+    next_func_id: &mut FuncId,
+) {
     let mut i = 0;
     while i < stmts.len() {
         // Recurse into nested control flow first so an inner unrollable
@@ -157,9 +203,9 @@ fn unroll_in_stmts(stmts: &mut Vec<Stmt>, changed: &mut bool) {
         // any enclosing outer loop, but the outer's body is already
         // simplified. Same end result either way for correctness; this
         // ordering is just slightly less work.
-        recurse_into_nested(&mut stmts[i], changed);
+        recurse_into_nested(&mut stmts[i], changed, next_local_id, next_func_id);
 
-        if let Some(unrolled) = try_unroll_for(&stmts[i]) {
+        if let Some(unrolled) = try_unroll_for(&stmts[i], next_local_id, next_func_id) {
             // Replace stmts[i] with `unrolled`'s contents.
             let inserted = unrolled.len();
             stmts.splice(i..=i, unrolled);
@@ -176,29 +222,34 @@ fn unroll_in_stmts(stmts: &mut Vec<Stmt>, changed: &mut bool) {
 /// (the outer driver handles it via try_unroll_for); but its body is
 /// walked so inner unrollable loops get processed before the outer's
 /// unroll attempt.
-fn recurse_into_nested(stmt: &mut Stmt, changed: &mut bool) {
+fn recurse_into_nested(
+    stmt: &mut Stmt,
+    changed: &mut bool,
+    next_local_id: &mut LocalId,
+    next_func_id: &mut FuncId,
+) {
     match stmt {
         Stmt::If {
             then_branch,
             else_branch,
             ..
         } => {
-            unroll_in_stmts(then_branch, changed);
+            unroll_in_stmts(then_branch, changed, next_local_id, next_func_id);
             if let Some(eb) = else_branch {
-                unroll_in_stmts(eb, changed);
+                unroll_in_stmts(eb, changed, next_local_id, next_func_id);
             }
         }
         Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
-            unroll_in_stmts(body, changed);
+            unroll_in_stmts(body, changed, next_local_id, next_func_id);
         }
         Stmt::For { body, .. } => {
             // Inner-first: unroll any qualifying loops inside this for's
             // body before deciding whether to unroll this for itself.
-            unroll_in_stmts(body, changed);
+            unroll_in_stmts(body, changed, next_local_id, next_func_id);
         }
         Stmt::Switch { cases, .. } => {
             for c in cases {
-                unroll_in_stmts(&mut c.body, changed);
+                unroll_in_stmts(&mut c.body, changed, next_local_id, next_func_id);
             }
         }
         Stmt::Try {
@@ -207,16 +258,16 @@ fn recurse_into_nested(stmt: &mut Stmt, changed: &mut bool) {
             finally,
             ..
         } => {
-            unroll_in_stmts(body, changed);
+            unroll_in_stmts(body, changed, next_local_id, next_func_id);
             if let Some(c) = catch {
-                unroll_in_stmts(&mut c.body, changed);
+                unroll_in_stmts(&mut c.body, changed, next_local_id, next_func_id);
             }
             if let Some(f) = finally {
-                unroll_in_stmts(f, changed);
+                unroll_in_stmts(f, changed, next_local_id, next_func_id);
             }
         }
         Stmt::Labeled { body, .. } => {
-            recurse_into_nested(body, changed);
+            recurse_into_nested(body, changed, next_local_id, next_func_id);
         }
         _ => {}
     }
@@ -226,7 +277,11 @@ fn recurse_into_nested(stmt: &mut Stmt, changed: &mut bool) {
 /// integer-literal-bounded shape with a small trip count and a body
 /// safe to unroll, return the unrolled stmt sequence. Returns `None`
 /// otherwise — caller leaves the original `Stmt::For` in place.
-fn try_unroll_for(stmt: &Stmt) -> Option<Vec<Stmt>> {
+fn try_unroll_for(
+    stmt: &Stmt,
+    next_local_id: &mut LocalId,
+    next_func_id: &mut FuncId,
+) -> Option<Vec<Stmt>> {
     let (init, condition, update, body) = match stmt {
         Stmt::For {
             init,
@@ -296,14 +351,26 @@ fn try_unroll_for(stmt: &Stmt) -> Option<Vec<Stmt>> {
     //    own `Stmt::Let` from the for's init is dropped — it doesn't
     //    appear in the unrolled output. `update` is dropped likewise (it
     //    only mutated the IV slot which no longer exists post-unroll).
+    //
+    //    After substitution, `refresh_local_ids` rewrites every binding
+    //    declared inside the cloned body (Stmt::Let, Closure params,
+    //    CatchClause::param) — and every reference to those bindings —
+    //    to fresh ids. Without this, the N copies share LocalIds, which
+    //    breaks two things at once:
+    //      * codegen emits one `@perry_global_*__<id>` per module-init
+    //        Stmt::Let with a referenced id, and N copies of the same
+    //        id cause LLVM duplicate-global errors (issue #456); and
+    //      * each iteration's `() => captured` closure is supposed to
+    //        bind a distinct value, which requires distinct capture ids.
     let mut out: Vec<Stmt> = Vec::with_capacity((trips as usize) * body.len());
     for n in 0..trips {
         let value = lo + n;
-        for s in body {
-            let mut cloned = s.clone();
-            substitute_localget_with_int_in_stmt(&mut cloned, iv_id, value);
-            out.push(cloned);
+        let mut cloned: Vec<Stmt> = body.iter().cloned().collect();
+        for s in &mut cloned {
+            substitute_localget_with_int_in_stmt(s, iv_id, value);
         }
+        refresh_local_ids(&mut cloned, next_local_id, next_func_id);
+        out.extend(cloned);
     }
     Some(out)
 }
@@ -553,6 +620,619 @@ fn substitute_localget_with_int(expr: &mut Expr, iv_id: LocalId, value: i64) {
     });
 }
 
+/// Walk a top-level scan of every `LocalId` reachable from `module` and
+/// return the highest. Mirrors the helper in `generator.rs` /
+/// `async_to_generator.rs`; duplicated here to avoid leaking a public
+/// dependency between transform passes (the convention in this crate is
+/// each pass inlines its own scan). Used to seed `next_local_id` so the
+/// fresh ids handed out by `refresh_local_ids` can never collide with an
+/// id already in use elsewhere in the module — every later transform
+/// (async_to_generator, transform_generators, codegen) assumes globally
+/// unique LocalIds.
+fn compute_max_local_id(module: &Module) -> LocalId {
+    let mut max_id: LocalId = 0;
+    for func in &module.functions {
+        for p in &func.params {
+            if p.id > max_id {
+                max_id = p.id;
+            }
+        }
+        scan_stmts_for_max_local(&func.body, &mut max_id);
+    }
+    scan_stmts_for_max_local(&module.init, &mut max_id);
+    for global in &module.globals {
+        if global.id > max_id {
+            max_id = global.id;
+        }
+    }
+    for class in &module.classes {
+        for method in &class.methods {
+            for p in &method.params {
+                if p.id > max_id {
+                    max_id = p.id;
+                }
+            }
+            scan_stmts_for_max_local(&method.body, &mut max_id);
+        }
+        for sm in &class.static_methods {
+            for p in &sm.params {
+                if p.id > max_id {
+                    max_id = p.id;
+                }
+            }
+            scan_stmts_for_max_local(&sm.body, &mut max_id);
+        }
+        if let Some(ctor) = &class.constructor {
+            for p in &ctor.params {
+                if p.id > max_id {
+                    max_id = p.id;
+                }
+            }
+            scan_stmts_for_max_local(&ctor.body, &mut max_id);
+        }
+        for (_n, g) in &class.getters {
+            for p in &g.params {
+                if p.id > max_id {
+                    max_id = p.id;
+                }
+            }
+            scan_stmts_for_max_local(&g.body, &mut max_id);
+        }
+        for (_n, s) in &class.setters {
+            for p in &s.params {
+                if p.id > max_id {
+                    max_id = p.id;
+                }
+            }
+            scan_stmts_for_max_local(&s.body, &mut max_id);
+        }
+    }
+    max_id
+}
+
+fn scan_stmts_for_max_local(stmts: &[Stmt], max_id: &mut LocalId) {
+    for s in stmts {
+        scan_stmt_for_max_local(s, max_id);
+    }
+}
+
+fn scan_stmt_for_max_local(stmt: &Stmt, max_id: &mut LocalId) {
+    match stmt {
+        Stmt::Let { id, init, .. } => {
+            if *id > *max_id {
+                *max_id = *id;
+            }
+            if let Some(e) = init {
+                scan_expr_for_max_local(e, max_id);
+            }
+        }
+        Stmt::Expr(e) | Stmt::Throw(e) => scan_expr_for_max_local(e, max_id),
+        Stmt::Return(opt) => {
+            if let Some(e) = opt {
+                scan_expr_for_max_local(e, max_id);
+            }
+        }
+        Stmt::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            scan_expr_for_max_local(condition, max_id);
+            scan_stmts_for_max_local(then_branch, max_id);
+            if let Some(eb) = else_branch {
+                scan_stmts_for_max_local(eb, max_id);
+            }
+        }
+        Stmt::While { condition, body } | Stmt::DoWhile { body, condition } => {
+            scan_expr_for_max_local(condition, max_id);
+            scan_stmts_for_max_local(body, max_id);
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+        } => {
+            if let Some(s) = init {
+                scan_stmt_for_max_local(s, max_id);
+            }
+            if let Some(c) = condition {
+                scan_expr_for_max_local(c, max_id);
+            }
+            if let Some(u) = update {
+                scan_expr_for_max_local(u, max_id);
+            }
+            scan_stmts_for_max_local(body, max_id);
+        }
+        Stmt::Try {
+            body,
+            catch,
+            finally,
+        } => {
+            scan_stmts_for_max_local(body, max_id);
+            if let Some(c) = catch {
+                if let Some((id, _)) = &c.param {
+                    if *id > *max_id {
+                        *max_id = *id;
+                    }
+                }
+                scan_stmts_for_max_local(&c.body, max_id);
+            }
+            if let Some(f) = finally {
+                scan_stmts_for_max_local(f, max_id);
+            }
+        }
+        Stmt::Switch {
+            discriminant,
+            cases,
+        } => {
+            scan_expr_for_max_local(discriminant, max_id);
+            for c in cases {
+                if let Some(t) = &c.test {
+                    scan_expr_for_max_local(t, max_id);
+                }
+                scan_stmts_for_max_local(&c.body, max_id);
+            }
+        }
+        Stmt::Labeled { body, .. } => scan_stmt_for_max_local(body, max_id),
+        Stmt::Break | Stmt::Continue | Stmt::LabeledBreak(_) | Stmt::LabeledContinue(_) => {}
+    }
+}
+
+fn scan_expr_for_max_local(expr: &Expr, max_id: &mut LocalId) {
+    fn bump(max_id: &mut LocalId, id: LocalId) {
+        if id > *max_id {
+            *max_id = id;
+        }
+    }
+    match expr {
+        Expr::LocalGet(id) | Expr::Update { id, .. } => bump(max_id, *id),
+        Expr::LocalSet(id, _) => bump(max_id, *id),
+        Expr::ArrayPush { array_id, .. }
+        | Expr::ArrayPushSpread { array_id, .. }
+        | Expr::ArrayUnshift { array_id, .. }
+        | Expr::ArraySplice { array_id, .. }
+        | Expr::ArrayCopyWithin { array_id, .. } => bump(max_id, *array_id),
+        Expr::ArrayPop(id) | Expr::ArrayShift(id) => bump(max_id, *id),
+        Expr::SetAdd { set_id, .. } => bump(max_id, *set_id),
+        Expr::Closure {
+            params,
+            body,
+            captures,
+            mutable_captures,
+            ..
+        } => {
+            for p in params {
+                bump(max_id, p.id);
+            }
+            for c in captures {
+                bump(max_id, *c);
+            }
+            for c in mutable_captures {
+                bump(max_id, *c);
+            }
+            scan_stmts_for_max_local(body, max_id);
+        }
+        _ => {}
+    }
+    walk_expr_children(expr, &mut |child| scan_expr_for_max_local(child, max_id));
+}
+
+/// Mirrors `compute_max_local_id` but for `FuncId`. Used to seed
+/// `next_func_id` so the fresh ids handed out to cloned `Expr::Closure`s
+/// in `refresh_in_expr` can never collide with a FuncId already in use
+/// elsewhere (top-level `Function::id`, other closures, generator state-
+/// machine helpers, etc.). Codegen keys compiled functions by FuncId, so
+/// any collision would collapse two different bodies into one.
+fn compute_max_func_id(module: &Module) -> FuncId {
+    let mut max_id: FuncId = 0;
+    for func in &module.functions {
+        if func.id > max_id {
+            max_id = func.id;
+        }
+        scan_stmts_for_max_func(&func.body, &mut max_id);
+    }
+    scan_stmts_for_max_func(&module.init, &mut max_id);
+    for class in &module.classes {
+        for m in &class.methods {
+            scan_stmts_for_max_func(&m.body, &mut max_id);
+        }
+        for sm in &class.static_methods {
+            scan_stmts_for_max_func(&sm.body, &mut max_id);
+        }
+        if let Some(ctor) = &class.constructor {
+            scan_stmts_for_max_func(&ctor.body, &mut max_id);
+        }
+        for (_n, g) in &class.getters {
+            scan_stmts_for_max_func(&g.body, &mut max_id);
+        }
+        for (_n, s) in &class.setters {
+            scan_stmts_for_max_func(&s.body, &mut max_id);
+        }
+    }
+    max_id
+}
+
+fn scan_stmts_for_max_func(stmts: &[Stmt], max_id: &mut FuncId) {
+    for s in stmts {
+        scan_stmt_for_max_func(s, max_id);
+    }
+}
+
+fn scan_stmt_for_max_func(stmt: &Stmt, max_id: &mut FuncId) {
+    match stmt {
+        Stmt::Let { init, .. } => {
+            if let Some(e) = init {
+                scan_expr_for_max_func(e, max_id);
+            }
+        }
+        Stmt::Expr(e) | Stmt::Throw(e) => scan_expr_for_max_func(e, max_id),
+        Stmt::Return(opt) => {
+            if let Some(e) = opt {
+                scan_expr_for_max_func(e, max_id);
+            }
+        }
+        Stmt::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            scan_expr_for_max_func(condition, max_id);
+            scan_stmts_for_max_func(then_branch, max_id);
+            if let Some(eb) = else_branch {
+                scan_stmts_for_max_func(eb, max_id);
+            }
+        }
+        Stmt::While { condition, body } | Stmt::DoWhile { body, condition } => {
+            scan_expr_for_max_func(condition, max_id);
+            scan_stmts_for_max_func(body, max_id);
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+        } => {
+            if let Some(s) = init {
+                scan_stmt_for_max_func(s, max_id);
+            }
+            if let Some(c) = condition {
+                scan_expr_for_max_func(c, max_id);
+            }
+            if let Some(u) = update {
+                scan_expr_for_max_func(u, max_id);
+            }
+            scan_stmts_for_max_func(body, max_id);
+        }
+        Stmt::Try {
+            body,
+            catch,
+            finally,
+        } => {
+            scan_stmts_for_max_func(body, max_id);
+            if let Some(c) = catch {
+                scan_stmts_for_max_func(&c.body, max_id);
+            }
+            if let Some(f) = finally {
+                scan_stmts_for_max_func(f, max_id);
+            }
+        }
+        Stmt::Switch {
+            discriminant,
+            cases,
+        } => {
+            scan_expr_for_max_func(discriminant, max_id);
+            for c in cases {
+                if let Some(t) = &c.test {
+                    scan_expr_for_max_func(t, max_id);
+                }
+                scan_stmts_for_max_func(&c.body, max_id);
+            }
+        }
+        Stmt::Labeled { body, .. } => scan_stmt_for_max_func(body, max_id),
+        Stmt::Break | Stmt::Continue | Stmt::LabeledBreak(_) | Stmt::LabeledContinue(_) => {}
+    }
+}
+
+fn scan_expr_for_max_func(expr: &Expr, max_id: &mut FuncId) {
+    fn bump(max_id: &mut FuncId, id: FuncId) {
+        if id > *max_id {
+            *max_id = id;
+        }
+    }
+    match expr {
+        Expr::FuncRef(id) => bump(max_id, *id),
+        Expr::Closure { func_id, body, .. } => {
+            bump(max_id, *func_id);
+            scan_stmts_for_max_func(body, max_id);
+        }
+        _ => {}
+    }
+    walk_expr_children(expr, &mut |child| scan_expr_for_max_func(child, max_id));
+}
+
+/// Per-iteration LocalId remap pass for `try_unroll_for`.
+///
+/// Walks `stmts` and assigns a fresh `LocalId` (drawn from `next_id`) to
+/// every binding the body declares — `Stmt::Let { id }`, `Closure::params`,
+/// and `CatchClause::param` — then rewrites every reference to those
+/// bindings within `stmts` to the new id. This includes:
+///   * `Expr::LocalGet`, `Expr::LocalSet`, `Expr::Update.id`
+///   * `Closure::captures` and `Closure::mutable_captures` Vecs
+///   * `Expr::ArrayPush.array_id`, `ArrayPushSpread`, `ArrayPop`,
+///     `ArrayShift`, `ArrayUnshift`, `ArraySplice`, `ArrayCopyWithin`
+///   * `Expr::SetAdd.set_id`
+///
+/// References to LocalIds NOT declared inside `stmts` (outer-scope vars
+/// captured by closures, the array `fns` captured from outside the for,
+/// etc.) are left unchanged — only ids the body itself introduces get
+/// remapped, which is the correct scope discipline.
+///
+/// `Stmt::Try` and `Stmt::Labeled` are rejected by `body_is_unrollable`
+/// so they shouldn't appear here, but the walker handles them defensively
+/// in case the unrollability rules ever loosen.
+fn refresh_local_ids(
+    stmts: &mut [Stmt],
+    next_id: &mut LocalId,
+    next_func_id: &mut FuncId,
+) {
+    let mut remap: HashMap<LocalId, LocalId> = HashMap::new();
+    for s in stmts.iter_mut() {
+        refresh_in_stmt(s, &mut remap, next_id, next_func_id);
+    }
+}
+
+fn alloc_fresh(remap: &mut HashMap<LocalId, LocalId>, next_id: &mut LocalId, id: &mut LocalId) {
+    let new_id = *next_id;
+    *next_id = next_id.saturating_add(1);
+    remap.insert(*id, new_id);
+    *id = new_id;
+}
+
+fn lookup(remap: &HashMap<LocalId, LocalId>, id: &mut LocalId) {
+    if let Some(&new) = remap.get(id) {
+        *id = new;
+    }
+}
+
+fn refresh_in_stmt(
+    stmt: &mut Stmt,
+    remap: &mut HashMap<LocalId, LocalId>,
+    next_id: &mut LocalId,
+    next_func_id: &mut FuncId,
+) {
+    match stmt {
+        Stmt::Let { id, init, .. } => {
+            alloc_fresh(remap, next_id, id);
+            if let Some(e) = init {
+                refresh_in_expr(e, remap, next_id, next_func_id);
+            }
+        }
+        Stmt::Expr(e) | Stmt::Throw(e) => refresh_in_expr(e, remap, next_id, next_func_id),
+        Stmt::Return(opt) => {
+            if let Some(e) = opt {
+                refresh_in_expr(e, remap, next_id, next_func_id);
+            }
+        }
+        Stmt::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            refresh_in_expr(condition, remap, next_id, next_func_id);
+            for s in then_branch {
+                refresh_in_stmt(s, remap, next_id, next_func_id);
+            }
+            if let Some(eb) = else_branch {
+                for s in eb {
+                    refresh_in_stmt(s, remap, next_id, next_func_id);
+                }
+            }
+        }
+        Stmt::While { condition, body } | Stmt::DoWhile { body, condition } => {
+            refresh_in_expr(condition, remap, next_id, next_func_id);
+            for s in body {
+                refresh_in_stmt(s, remap, next_id, next_func_id);
+            }
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+        } => {
+            if let Some(s) = init {
+                refresh_in_stmt(s, remap, next_id, next_func_id);
+            }
+            if let Some(c) = condition {
+                refresh_in_expr(c, remap, next_id, next_func_id);
+            }
+            if let Some(u) = update {
+                refresh_in_expr(u, remap, next_id, next_func_id);
+            }
+            for s in body {
+                refresh_in_stmt(s, remap, next_id, next_func_id);
+            }
+        }
+        Stmt::Try {
+            body,
+            catch,
+            finally,
+        } => {
+            for s in body {
+                refresh_in_stmt(s, remap, next_id, next_func_id);
+            }
+            if let Some(c) = catch {
+                if let Some((id, _)) = &mut c.param {
+                    alloc_fresh(remap, next_id, id);
+                }
+                for s in &mut c.body {
+                    refresh_in_stmt(s, remap, next_id, next_func_id);
+                }
+            }
+            if let Some(f) = finally {
+                for s in f {
+                    refresh_in_stmt(s, remap, next_id, next_func_id);
+                }
+            }
+        }
+        Stmt::Switch {
+            discriminant,
+            cases,
+        } => {
+            refresh_in_expr(discriminant, remap, next_id, next_func_id);
+            for c in cases {
+                if let Some(t) = &mut c.test {
+                    refresh_in_expr(t, remap, next_id, next_func_id);
+                }
+                for s in &mut c.body {
+                    refresh_in_stmt(s, remap, next_id, next_func_id);
+                }
+            }
+        }
+        Stmt::Labeled { body, .. } => refresh_in_stmt(body, remap, next_id, next_func_id),
+        Stmt::Break | Stmt::Continue | Stmt::LabeledBreak(_) | Stmt::LabeledContinue(_) => {}
+    }
+}
+
+fn refresh_in_expr(
+    expr: &mut Expr,
+    remap: &mut HashMap<LocalId, LocalId>,
+    next_id: &mut LocalId,
+    next_func_id: &mut FuncId,
+) {
+    // Handle id-bearing variants explicitly so we both remap the id and
+    // recurse into any contained sub-expressions ourselves. Variants with
+    // no LocalId fall through to the walker.
+    match expr {
+        Expr::LocalGet(id) => {
+            lookup(remap, id);
+            return;
+        }
+        Expr::LocalSet(id, value) => {
+            lookup(remap, id);
+            refresh_in_expr(value, remap, next_id, next_func_id);
+            return;
+        }
+        Expr::Update { id, .. } => {
+            lookup(remap, id);
+            return;
+        }
+        Expr::ArrayPush { array_id, value } => {
+            lookup(remap, array_id);
+            refresh_in_expr(value, remap, next_id, next_func_id);
+            return;
+        }
+        Expr::ArrayPushSpread { array_id, source } => {
+            lookup(remap, array_id);
+            refresh_in_expr(source, remap, next_id, next_func_id);
+            return;
+        }
+        Expr::ArrayPop(id) | Expr::ArrayShift(id) => {
+            lookup(remap, id);
+            return;
+        }
+        Expr::ArrayUnshift { array_id, value } => {
+            lookup(remap, array_id);
+            refresh_in_expr(value, remap, next_id, next_func_id);
+            return;
+        }
+        Expr::ArraySplice {
+            array_id,
+            start,
+            delete_count,
+            items,
+        } => {
+            lookup(remap, array_id);
+            refresh_in_expr(start, remap, next_id, next_func_id);
+            if let Some(dc) = delete_count {
+                refresh_in_expr(dc, remap, next_id, next_func_id);
+            }
+            for it in items {
+                refresh_in_expr(it, remap, next_id, next_func_id);
+            }
+            return;
+        }
+        Expr::ArrayCopyWithin {
+            array_id,
+            target,
+            start,
+            end,
+        } => {
+            lookup(remap, array_id);
+            refresh_in_expr(target, remap, next_id, next_func_id);
+            refresh_in_expr(start, remap, next_id, next_func_id);
+            if let Some(e) = end {
+                refresh_in_expr(e, remap, next_id, next_func_id);
+            }
+            return;
+        }
+        Expr::SetAdd { set_id, value } => {
+            lookup(remap, set_id);
+            refresh_in_expr(value, remap, next_id, next_func_id);
+            return;
+        }
+        Expr::Closure {
+            func_id,
+            params,
+            body,
+            captures,
+            mutable_captures,
+            ..
+        } => {
+            // Each cloned closure must get its own FuncId. Codegen keys
+            // compiled functions by FuncId, so two cloned `() => captured`
+            // closures sharing one FuncId would collapse into a single
+            // compiled function — every iteration's `fns[i]()` would then
+            // read the same global. Bumping FuncId per clone keeps each
+            // closure on its own compiled body.
+            *func_id = *next_func_id;
+            *next_func_id = next_func_id.saturating_add(1);
+
+            // Closure params are NEW declarations within the closure
+            // scope — allocate fresh ids and add them to the same remap
+            // so the closure body's LocalGets pick them up.
+            for p in params.iter_mut() {
+                alloc_fresh(remap, next_id, &mut p.id);
+                if let Some(d) = &mut p.default {
+                    refresh_in_expr(d, remap, next_id, next_func_id);
+                }
+            }
+            // captures / mutable_captures are LocalIds referring to the
+            // enclosing scope — remap any that the outer scope renamed.
+            for c in captures.iter_mut() {
+                lookup(remap, c);
+            }
+            for c in mutable_captures.iter_mut() {
+                lookup(remap, c);
+            }
+            // The walker doesn't descend into Closure bodies (Vec<Stmt>) —
+            // we handle that here ourselves.
+            for s in body.iter_mut() {
+                refresh_in_stmt(s, remap, next_id, next_func_id);
+            }
+            return;
+        }
+        Expr::CallSpread { callee, args, .. } => {
+            // walk_expr_children_mut visits CallArg children — but to
+            // avoid relying on its exact behavior, recurse explicitly.
+            refresh_in_expr(callee, remap, next_id, next_func_id);
+            for a in args {
+                let inner = match a {
+                    CallArg::Expr(e) | CallArg::Spread(e) => e,
+                };
+                refresh_in_expr(inner, remap, next_id, next_func_id);
+            }
+            return;
+        }
+        _ => {}
+    }
+    // Default: recurse into all sub-expressions via the walker.
+    walk_expr_children_mut(expr, &mut |child| {
+        refresh_in_expr(child, remap, next_id, next_func_id);
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,6 +1245,26 @@ mod tests {
 
     fn integer(n: i64) -> Expr {
         Expr::Integer(n)
+    }
+
+    /// Test helper: wrap `try_unroll_for` with throwaway fresh-id counters
+    /// so individual tests don't have to thread them. Tests pick LocalIds
+    /// well below `START` so the remap-allocated ids never collide.
+    fn try_unroll(stmt: &Stmt) -> Option<Vec<Stmt>> {
+        const START: LocalId = 10_000;
+        const FUNC_START: FuncId = 10_000;
+        let mut next_id: LocalId = START;
+        let mut next_func_id: FuncId = FUNC_START;
+        try_unroll_for(stmt, &mut next_id, &mut next_func_id)
+    }
+
+    /// Test helper: wrap `unroll_in_stmts` with the same throwaway counters.
+    fn run_unroll_in_stmts(stmts: &mut Vec<Stmt>, changed: &mut bool) {
+        const START: LocalId = 10_000;
+        const FUNC_START: FuncId = 10_000;
+        let mut next_id: LocalId = START;
+        let mut next_func_id: FuncId = FUNC_START;
+        unroll_in_stmts(stmts, changed, &mut next_id, &mut next_func_id);
     }
 
     /// Build `for (let i = lo; i <= hi; i++) { body }`.
@@ -605,7 +1305,7 @@ mod tests {
             }),
         ))];
         let f = make_for(i, -2, 2, body, CompareOp::Le);
-        let unrolled = try_unroll_for(&f).expect("should unroll");
+        let unrolled = try_unroll(&f).expect("should unroll");
         assert_eq!(unrolled.len(), 5);
         // Each iteration replaces LocalGet(i) with Integer(-2..2).
         for (n, s) in unrolled.iter().enumerate() {
@@ -636,7 +1336,7 @@ mod tests {
         let i = 1u32;
         let body = vec![Stmt::Expr(Expr::LocalGet(i))];
         let f = make_for(i, 0, 3, body, CompareOp::Lt);
-        let unrolled = try_unroll_for(&f).expect("should unroll");
+        let unrolled = try_unroll(&f).expect("should unroll");
         // i = 0, 1, 2 — 3 trips for `<`.
         assert_eq!(unrolled.len(), 3);
     }
@@ -647,7 +1347,7 @@ mod tests {
         let i = 1u32;
         let body = vec![Stmt::Expr(Expr::LocalGet(i))];
         let f = make_for(i, 0, 100, body, CompareOp::Lt);
-        assert!(try_unroll_for(&f).is_none());
+        assert!(try_unroll(&f).is_none());
     }
 
     #[test]
@@ -655,7 +1355,7 @@ mod tests {
         let i = 1u32;
         let body = vec![Stmt::Break];
         let f = make_for(i, 0, 3, body, CompareOp::Lt);
-        assert!(try_unroll_for(&f).is_none());
+        assert!(try_unroll(&f).is_none());
     }
 
     #[test]
@@ -663,7 +1363,7 @@ mod tests {
         let i = 1u32;
         let body = vec![Stmt::Continue];
         let f = make_for(i, 0, 3, body, CompareOp::Lt);
-        assert!(try_unroll_for(&f).is_none());
+        assert!(try_unroll(&f).is_none());
     }
 
     #[test]
@@ -672,7 +1372,7 @@ mod tests {
         let i = 1u32;
         let body = vec![Stmt::Expr(Expr::LocalSet(i, Box::new(integer(99))))];
         let f = make_for(i, 0, 3, body, CompareOp::Lt);
-        assert!(try_unroll_for(&f).is_none());
+        assert!(try_unroll(&f).is_none());
     }
 
     #[test]
@@ -684,7 +1384,7 @@ mod tests {
             prefix: false,
         })];
         let f = make_for(i, 0, 3, body, CompareOp::Lt);
-        assert!(try_unroll_for(&f).is_none());
+        assert!(try_unroll(&f).is_none());
     }
 
     #[test]
@@ -696,7 +1396,7 @@ mod tests {
             finally: None,
         }];
         let f = make_for(i, 0, 3, body, CompareOp::Lt);
-        assert!(try_unroll_for(&f).is_none());
+        assert!(try_unroll(&f).is_none());
     }
 
     #[test]
@@ -723,7 +1423,7 @@ mod tests {
             }),
             body: vec![],
         };
-        assert!(try_unroll_for(&f).is_none());
+        assert!(try_unroll(&f).is_none());
     }
 
     #[test]
@@ -749,7 +1449,7 @@ mod tests {
             }),
             body: vec![],
         };
-        assert!(try_unroll_for(&f).is_none());
+        assert!(try_unroll(&f).is_none());
     }
 
     #[test]
@@ -780,7 +1480,7 @@ mod tests {
         // Wrap in a vec and run unroll_in_stmts (so nested unroll fires).
         let mut stmts = vec![outer];
         let mut changed = false;
-        unroll_in_stmts(&mut stmts, &mut changed);
+        run_unroll_in_stmts(&mut stmts, &mut changed);
         assert!(changed, "expected unroll to fire");
 
         // After full nested unroll: 5 ky × 5 kx = 25 stmts.
@@ -854,7 +1554,7 @@ mod tests {
             },
         ];
         let f = make_for(kx, -2, 2, body, CompareOp::Le);
-        let unrolled = try_unroll_for(&f).expect("inner-loop break should not block unroll");
+        let unrolled = try_unroll(&f).expect("inner-loop break should not block unroll");
         // 5 iterations × 2 stmts each (Let + DoWhile) = 10 stmts.
         assert_eq!(unrolled.len(), 10);
     }
@@ -876,7 +1576,7 @@ mod tests {
             else_branch: None,
         }];
         let f = make_for(i, 0, 3, body, CompareOp::Lt);
-        assert!(try_unroll_for(&f).is_none());
+        assert!(try_unroll(&f).is_none());
     }
 
     #[test]
@@ -904,7 +1604,7 @@ mod tests {
         };
         let mut stmts = vec![if_stmt];
         let mut changed = false;
-        unroll_in_stmts(&mut stmts, &mut changed);
+        run_unroll_in_stmts(&mut stmts, &mut changed);
         assert!(changed, "expected unroll to fire");
         match &stmts[0] {
             Stmt::If { then_branch, .. } => {
