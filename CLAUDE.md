@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.576
+**Current Version:** 0.5.577
 
 
 ## TypeScript Parity Status
@@ -152,6 +152,8 @@ First-resolved directory cached in `compile_package_dirs`; subsequent imports re
 ## Recent Changes
 
 One-liners only — full detail in CHANGELOG.md.
+
+- **v0.5.577** — **Closes #482** (refs #421/#420): `class Foo {}` followed by `export { Foo }` in a separate clause was lowered with `is_exported = false` (because the decl wasn't a syntactic `export class Foo {}`). The CLI driver's `exported_classes` lookup (`crates/perry/src/commands/compile.rs:1684`) filters on `class.is_exported`, so the class never reached the importer's `imported_classes` registry — `new Foo()` from another module fell through to the empty-object placeholder, and method calls like `f.add(...)` returned undefined. Hono's `RegExpRouter` / `Trie` / `Node` / `HonoBase` all use this pattern (`var X = class { ... }; export { X };` or `class X {}; export { X };`), so route registration silently no-op'd and `app.fetch()` returned a default Response with no status/body. Fix is one block in `crates/perry-hir/src/lower.rs`'s `ExportNamed` arm: after pushing the export clause, walk `module.classes` for one whose name matches the local and flip its `is_exported = true`. Hand-written class repro (`class Foo { add() {} }; export { Foo };` from a `compilePackages` package) round-trips correctly post-fix; `f.add()` returns the expected value. Hono progresses past route registration but `app.request()` still returns undefined (separate, deeper bug — class-field arrow methods on classes with private fields). Drizzle schema construction also benefits.
 
 - **v0.5.576** — Refs #420 (compile drizzle-orm end-to-end shake-out batch 1 — duplicate-symbol fix on `__perry_wrap_perry_unknown_func`): the v0.5.337 fallback wrapper for unresolvable `Expr::FuncRef` ids was emitted with default (external) linkage, so multi-module programs (drizzle-orm has 5+ modules each emitting it) failed link with `duplicate symbol ___perry_wrap_perry_unknown_func`. Flipped to `internal` linkage matching the surrounding `__perry_wrap_extern_*` wrappers (their comment block explicitly calls out the same pattern). End-to-end smoke verified: `import { pgTable, serial, text, integer } from 'drizzle-orm/pg-core'` compiles and runs through to schema construction. Followups under #420 / #421: hono full dispatch chain still doesn't fire route handlers (separate, deeper bug — class-private-fields + closure-call in `compose()` / `RegExpRouter`); drizzle query execution against a real postgres needs perry-ext-pg integration smoke-test.
 
