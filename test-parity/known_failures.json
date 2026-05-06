@@ -6,5 +6,6 @@
   "test_net_min": "Net test passes locally with echo server running, fails on Linux CI (no echo fixture server). Environmental.",
   "test_net_socket": "Net test passes locally with echo server running, fails on Linux CI (no echo fixture server). Environmental.",
   "test_net_upgrade_tls": "Net test needs a TLS-capable echo server fixture; not available on CI. Environmental.",
-  "test_sock_write_map": "Net test passes locally with echo server running, fails on Linux CI (no echo fixture server). Environmental — issue #91 dispatch fix landed in v0.5.581."
+  "test_sock_write_map": "Net test passes locally with echo server running, fails on Linux CI (no echo fixture server). Environmental — issue #91 dispatch fix landed in v0.5.581.",
+  "test_issue_446_import_type_method_typeof": "Pre-existing #446 path: type-only-import class metadata flow into imported_classes is wired but `typeof MethodCall` on the imported class returns 'object' on Linux CI vs 'function' on macOS. Platform-specific; not a regression. Tracked under #446."
 }
