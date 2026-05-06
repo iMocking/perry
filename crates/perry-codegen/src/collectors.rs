@@ -5853,12 +5853,40 @@ fn check_object_literal_escapes_in_expr(
             check_object_literal_escapes_in_expr(else_expr, candidates, escaped);
         }
         Expr::Call { callee, args, .. } => {
+            // Issue #518: `cur.toArray()` where `cur` is a scalar-replaceable
+            // object literal — the PropertyGet handler above treats it as
+            // safe because `toArray` is a known field, but in CALLEE position
+            // the receiver (`cur`) is passed implicitly to the method
+            // dispatcher (`js_native_call_method` in lower_call.rs takes a
+            // receiver and uses it for `this`). Without a real heap object,
+            // codegen loads the dummy slot — uninitialized memory — and
+            // dispatch returns NULL_OBJECT_BYTES instead of the closure's
+            // result. Mark the candidate as escaped so the standard heap
+            // path lowers `cur` correctly. Bare property READS (`cur.x` in
+            // an arithmetic context) keep the scalar-replacement fast path.
+            if let Expr::PropertyGet { object, .. } = callee.as_ref() {
+                if let Expr::LocalGet(id) = object.as_ref() {
+                    if candidates.contains_key(id) {
+                        escaped.insert(*id);
+                    }
+                }
+            }
             check_object_literal_escapes_in_expr(callee, candidates, escaped);
             for a in args {
                 check_object_literal_escapes_in_expr(a, candidates, escaped);
             }
         }
         Expr::CallSpread { callee, args, .. } => {
+            // Same #518 reasoning as `Call` above — method-call receiver
+            // escapes via dispatch even though the callee form looks like a
+            // safe property read.
+            if let Expr::PropertyGet { object, .. } = callee.as_ref() {
+                if let Expr::LocalGet(id) = object.as_ref() {
+                    if candidates.contains_key(id) {
+                        escaped.insert(*id);
+                    }
+                }
+            }
             check_object_literal_escapes_in_expr(callee, candidates, escaped);
             for a in args {
                 match a {
