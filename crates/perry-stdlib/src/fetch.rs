@@ -53,6 +53,14 @@ struct FetchResponse {
     status_text: String,
     headers: HashMap<String, String>,
     body: Vec<u8>,
+    /// Cached Headers handle id, allocated on first `response.headers`
+    /// access. None until a property/method dispatcher needs to expose
+    /// the headers as a Headers instance. The Vec form (insertion-ordered
+    /// HeadersStore) is what dispatch_headers_method reads, so we copy
+    /// the HashMap into a fresh HeadersStore the first time and cache
+    /// the resulting registry id; subsequent reads of `.headers` return
+    /// the same id (preserves `res.headers === res.headers`).
+    cached_headers_id: Option<usize>,
 }
 
 /// Extract the registry id from a Web Fetch handle f64 value.
@@ -177,6 +185,7 @@ pub unsafe extern "C" fn js_fetch_get(url_ptr: *const StringHeader) -> *mut perr
                         status_text,
                         headers,
                         body,
+                        cached_headers_id: None,
                     },
                 );
 
@@ -253,6 +262,7 @@ pub unsafe extern "C" fn js_fetch_get_with_auth(
                         status_text,
                         headers,
                         body,
+                        cached_headers_id: None,
                     },
                 );
 
@@ -331,6 +341,7 @@ pub unsafe extern "C" fn js_fetch_post_with_auth(
                         status_text,
                         headers,
                         body,
+                        cached_headers_id: None,
                     },
                 );
 
@@ -412,6 +423,7 @@ pub unsafe extern "C" fn js_fetch_post(
                         status_text,
                         headers,
                         body,
+                        cached_headers_id: None,
                     },
                 );
 
@@ -512,6 +524,7 @@ pub unsafe extern "C" fn js_fetch_with_options(
                         status_text,
                         headers,
                         body,
+                        cached_headers_id: None,
                     },
                 );
 
@@ -992,6 +1005,7 @@ fn alloc_response(status: u16, status_text: String, headers: HeadersStore, body:
             status_text,
             headers: hdr_map,
             body,
+            cached_headers_id: None,
         },
     );
     id
@@ -1170,6 +1184,7 @@ pub extern "C" fn js_response_clone(handle: f64) -> f64 {
             status_text: resp.status_text.clone(),
             headers: resp.headers.clone(),
             body: resp.body.clone(),
+            cached_headers_id: None,
         })
     };
     if let Some(new_resp) = cloned {
@@ -1471,6 +1486,38 @@ pub fn dispatch_request_property(req_id: usize, prop: &str) -> Option<f64> {
 /// Returns `None` if the id isn't a known Response or the property is unknown.
 #[doc(hidden)]
 pub fn dispatch_response_property(resp_id: usize, prop: &str) -> Option<f64> {
+    // `response.headers` — lazily allocate a Headers registry entry
+    // backed by the response's stored header map and cache the id on the
+    // FetchResponse so repeat reads return the same handle (preserves
+    // `res.headers === res.headers`). Hono's `#newResponse` mutates the
+    // returned Headers object via `.set(k, v)`, but our snapshot is a
+    // copy of the response's header HashMap — mutations land on the
+    // Headers handle's HeadersStore, not back on the FetchResponse.
+    // For the read-only case (the issue #486 acceptance) this is
+    // sufficient; spec-perfect "live header view" would need the
+    // FetchResponse's storage to be the same Vec as the Headers
+    // entries, which is a wider refactor.
+    if prop == "headers" {
+        let cached = {
+            let guard = FETCH_RESPONSES.lock().unwrap();
+            guard.get(&resp_id)?.cached_headers_id
+        };
+        let id = match cached {
+            Some(id) => id,
+            None => {
+                let store = {
+                    let guard = FETCH_RESPONSES.lock().unwrap();
+                    HeadersStore::from_hashmap(&guard.get(&resp_id)?.headers)
+                };
+                let new_id = alloc_headers(store);
+                if let Some(resp) = FETCH_RESPONSES.lock().unwrap().get_mut(&resp_id) {
+                    resp.cached_headers_id = Some(new_id);
+                }
+                new_id
+            }
+        };
+        return Some(handle_to_f64(id));
+    }
     let guard = FETCH_RESPONSES.lock().unwrap();
     let resp = guard.get(&resp_id)?;
     let bits = match prop {

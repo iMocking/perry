@@ -2942,14 +2942,29 @@ fn apply_field_initializers_recursive(ctx: &mut FnCtx<'_>, class_name: &str) -> 
         // holding an immutable borrow of ctx.classes across lower_expr.
         // Computed-key fields (`[Symbol.for("k")]` etc.) live in a parallel
         // list since their key is an expression that needs runtime evaluation.
+        //
+        // Fields declared without an initializer (`#x;` / `x: any;`) must
+        // still be written in the constructor as `undefined` — JS semantics
+        // is `new C().x === undefined`, not zero-bytes from the allocator.
+        // Without the explicit write, regular methods see `undefined` (the
+        // field-by-name dispatcher returns undefined for absent fields),
+        // but arrow-class-field bodies that load `this.x` through the
+        // captured-this slot read raw zero bytes — `0 ?? fallback` then
+        // takes the wrong branch (0 is falsy but not nullish), breaking
+        // common patterns like `this.#preparedHeaders ?? new Headers()`
+        // in hono's Context. Lower the missing-init case to
+        // `Expr::Undefined` so the constructor writes the spec-correct
+        // value into the field slot. Refs #486.
         let mut init_pairs: Vec<(String, Expr)> = Vec::new();
         let mut init_pairs_computed: Vec<(Expr, Expr)> = Vec::new();
         for field in &class.fields {
-            if let Some(init) = &field.init {
-                match &field.key_expr {
-                    Some(key) => init_pairs_computed.push((key.clone(), init.clone())),
-                    None => init_pairs.push((field.name.clone(), init.clone())),
-                }
+            let init = match &field.init {
+                Some(e) => e.clone(),
+                None => Expr::Undefined,
+            };
+            match &field.key_expr {
+                Some(key) => init_pairs_computed.push((key.clone(), init)),
+                None => init_pairs.push((field.name.clone(), init)),
             }
         }
         if init_pairs.is_empty() && init_pairs_computed.is_empty() {

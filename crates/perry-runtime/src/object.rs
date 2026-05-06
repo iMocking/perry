@@ -2826,6 +2826,53 @@ pub extern "C" fn js_object_get_field_by_name(
             }
         }
 
+        // Key not found in the keys_array — fall back to the class
+        // vtable's getter map. Refs #486 (hono): cross-module class
+        // getters (e.g. hono Context's `get req()` defined in
+        // `hono/dist/context.js` and read from a user `c.req.url`
+        // expression in main.ts) reach this point because the field
+        // dispatcher only looks for stored fields, not getter accessors.
+        // The getter is registered in `CLASS_VTABLE_REGISTRY` via
+        // `js_register_class_getter` at module init by codegen — invoke
+        // it with the same NaN-boxed `this` the codegen passes for
+        // method dispatch.
+        let class_id = (*obj).class_id;
+        if class_id != 0 {
+            if let Ok(registry) = CLASS_VTABLE_REGISTRY.read() {
+                if let Some(ref reg) = *registry {
+                    // Walk the class -> parent chain so a getter declared
+                    // on a base class is also found when the receiver is
+                    // a subclass instance. `get_parent_class_id` reads
+                    // CLASS_REGISTRY (populated by `js_register_class_parent`).
+                    let mut cid = class_id;
+                    let mut depth = 0usize;
+                    while depth < 32 {
+                        if let Some(vtable) = reg.get(&cid) {
+                            if let Ok(name) = std::str::from_utf8(key_bytes) {
+                                if let Some(&getter_ptr) = vtable.getters.get(name) {
+                                    // Getters take `this` as f64 (NaN-boxed
+                                    // POINTER_TAG), matching the codegen
+                                    // calling convention for class methods.
+                                    let this_f64: f64 =
+                                        f64::from_bits(crate::value::js_nanbox_pointer(obj as i64).to_bits());
+                                    let f: extern "C" fn(f64) -> f64 =
+                                        std::mem::transmute(getter_ptr);
+                                    return JSValue::from_bits(f(this_f64).to_bits());
+                                }
+                            }
+                        }
+                        match get_parent_class_id(cid) {
+                            Some(p) if p != 0 && p != cid => {
+                                cid = p;
+                                depth += 1;
+                            }
+                            _ => break,
+                        }
+                    }
+                }
+            }
+        }
+
         // Key not found
         JSValue::undefined()
     }

@@ -2382,6 +2382,13 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         for method in &class.methods {
             let _ = strings.intern(&method.name);
         }
+        // Refs #486: also intern getter property names so the cross-module
+        // `js_register_class_getter` registration loop in emit_string_pool
+        // can find their bytes_global without re-running through the
+        // string pool's mutable interner.
+        for (prop, _) in &class.getters {
+            let _ = strings.intern(prop);
+        }
     }
 
     // After all user code is lowered, the string pool's contents are final.
@@ -4230,6 +4237,66 @@ fn emit_string_pool(
                 (I64, &len_str),
                 (I64, &func_i64),
                 (I64, &param_count.to_string()),
+            ],
+        );
+    }
+
+    // Refs #486 (hono logger middleware): also register every class
+    // getter in the runtime VTABLE_REGISTRY. Without this, cross-module
+    // `obj.prop` reads (where `obj` is statically typed `any` so the
+    // codegen has no static dispatch info) fall through `js_get_object_field_by_name`
+    // past the `vtable.getters.get(prop)` lookup at value.rs:2268 — the
+    // map is always empty — and into the field-by-name dispatcher,
+    // which returns `undefined` for properties that exist only as
+    // getters. Hono's `Context.get req()` is the canonical breakage:
+    // the logger middleware reads `c.req.url` from a JS-bundled hono
+    // dist via `compilePackages`, and pre-fix `c.req` always returned
+    // `undefined`.
+    let mut getter_pairs: Vec<(u32, String, String)> = Vec::new();
+    for (class_name, class) in classes.iter() {
+        let cid = match class_ids.get(class_name).copied() {
+            Some(c) if c != 0 => c,
+            _ => continue,
+        };
+        for (prop, getter_fn) in &class.getters {
+            // Skip imported class stubs: their `body` is empty (the
+            // defining module's init registers them).
+            if getter_fn.body.is_empty() {
+                continue;
+            }
+            // The local-emit path at codegen.rs:1858 prepends `__get_`
+            // to the HIR-assigned getter name (`get_<prop>`), giving
+            // the LLVM symbol `perry_method_<modprefix>__<class>__<sanitize(__get_get_<prop>)>`.
+            // Use the same mangling here so the registered func_ptr
+            // matches the actual emitted body.
+            let inner = format!("__get_{}", getter_fn.name);
+            let llvm_name = format!(
+                "perry_method_{}__{}__{}",
+                module_prefix,
+                sanitize(class_name),
+                sanitize(&inner),
+            );
+            getter_pairs.push((cid, prop.clone(), llvm_name));
+        }
+    }
+    getter_pairs.sort_unstable();
+    for (cid, prop_name, llvm_name) in getter_pairs {
+        let entry = match strings.iter().find(|e| e.value == prop_name) {
+            Some(e) => e,
+            None => continue,
+        };
+        let bytes_global = format!("@{}", entry.bytes_global);
+        let len_str = entry.byte_len.to_string();
+        let func_ref = format!("@{}", llvm_name);
+        let func_i64 = blk.ptrtoint(&func_ref, I64);
+        let bytes_i64 = blk.ptrtoint(&bytes_global, I64);
+        blk.call_void(
+            "js_register_class_getter",
+            &[
+                (I64, &cid.to_string()),
+                (I64, &bytes_i64),
+                (I64, &len_str),
+                (I64, &func_i64),
             ],
         );
     }
