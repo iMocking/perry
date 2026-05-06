@@ -611,6 +611,28 @@ pub unsafe extern "C" fn js_handle_property_dispatch(
         }
     }
 
+    // Web Fetch property dispatch (refs #421 — Phase 1 of the handle-NaN-boxing
+    // unification). When user code accesses a property on a Request / Response /
+    // Headers / Blob handle in untyped position (`(r) => r.url` where the static
+    // type is `any` — typical of npm packages whose TS sources have been
+    // type-stripped, like hono's compiled JS), codegen falls through to
+    // `js_object_get_field_by_name` which strips POINTER_TAG and routes here.
+    // Each helper does its own registry-membership check; the order matches the
+    // observed property-name disjointness (`url` / `method` only on Request,
+    // `status` / `ok` only on Response, etc.). First match wins.
+    if let Some(v) = crate::fetch::dispatch_request_property(handle as usize, property_name) {
+        return v;
+    }
+    if let Some(v) = crate::fetch::dispatch_response_property(handle as usize, property_name) {
+        return v;
+    }
+    if let Some(v) = crate::fetch::dispatch_headers_property(handle as usize, property_name) {
+        return v;
+    }
+    if let Some(v) = crate::fetch::dispatch_blob_property(handle as usize, property_name) {
+        return v;
+    }
+
     // Unknown handle type - return undefined
     f64::from_bits(0x7FFC_0000_0000_0001)
 }

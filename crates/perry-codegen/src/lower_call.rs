@@ -3529,42 +3529,41 @@ pub(super) fn lower_fetch_native_method(
 
     // ── Response methods / property getters ──
     if module == "fetch" {
-        // Lower the receiver once. It may be a Response (f64 handle) or
-        // a chained result from `.headers` / `.clone()` — in the former
-        // case we dispatch the methods here; the chain cases are
-        // recognised at the Call callsite in lower_call.
+        // Lower the receiver once. It's a NaN-boxed POINTER_TAG handle (Phase 1
+        // of the handle-NaN-boxing unification, refs #421) — accessors unbox
+        // via `handle_id` on entry, so codegen passes recv_handle through as
+        // DOUBLE without any fptosi/bitcast conversion. May also be a chained
+        // result from `.headers` / `.clone()` — those cases are recognised at
+        // the Call callsite in lower_call.
         let recv_handle = lower_expr(ctx, recv)?;
         match method {
             "text" => {
                 let blk = ctx.block();
-                let h_i64 = blk.fptosi(DOUBLE, &recv_handle, I64);
-                let promise = blk.call(I64, "js_fetch_response_text", &[(I64, &h_i64)]);
+                let promise = blk.call(I64, "js_fetch_response_text", &[(DOUBLE, &recv_handle)]);
                 return Ok(Some(nanbox_pointer_inline(blk, &promise)));
             }
             "json" => {
                 let blk = ctx.block();
-                let h_i64 = blk.fptosi(DOUBLE, &recv_handle, I64);
-                let promise = blk.call(I64, "js_fetch_response_json", &[(I64, &h_i64)]);
+                let promise = blk.call(I64, "js_fetch_response_json", &[(DOUBLE, &recv_handle)]);
                 return Ok(Some(nanbox_pointer_inline(blk, &promise)));
             }
             "status" => {
                 let blk = ctx.block();
-                let h_i64 = blk.fptosi(DOUBLE, &recv_handle, I64);
-                let status = blk.call(DOUBLE, "js_fetch_response_status", &[(I64, &h_i64)]);
+                let status =
+                    blk.call(DOUBLE, "js_fetch_response_status", &[(DOUBLE, &recv_handle)]);
                 return Ok(Some(status));
             }
             "statusText" => {
                 let blk = ctx.block();
-                let h_i64 = blk.fptosi(DOUBLE, &recv_handle, I64);
-                let str_ptr = blk.call(I64, "js_fetch_response_status_text", &[(I64, &h_i64)]);
+                let str_ptr =
+                    blk.call(I64, "js_fetch_response_status_text", &[(DOUBLE, &recv_handle)]);
                 return Ok(Some(nanbox_string_inline(blk, &str_ptr)));
             }
             "ok" => {
                 // js_fetch_response_ok returns 1.0 or 0.0 as f64. Map to
                 // TAG_TRUE/TAG_FALSE so console.log prints "true"/"false".
                 let blk = ctx.block();
-                let h_i64 = blk.fptosi(DOUBLE, &recv_handle, I64);
-                let raw = blk.call(DOUBLE, "js_fetch_response_ok", &[(I64, &h_i64)]);
+                let raw = blk.call(DOUBLE, "js_fetch_response_ok", &[(DOUBLE, &recv_handle)]);
                 let cmp = blk.fcmp("une", &raw, "0.0");
                 let tagged = blk.select(
                     crate::types::I1,

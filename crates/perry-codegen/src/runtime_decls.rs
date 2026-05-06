@@ -973,12 +973,13 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_array_values", I64, &[I64]);
 
     // ──────────────────────────────────────────────────────────────────
-    // Web Fetch API: Response / Headers / Request constructors +
-    // response body methods + static factories. These are in
-    // `crates/perry-stdlib/src/fetch.rs`. Handles flow as plain numeric
-    // f64 values (not NaN-boxed) so codegen passes them as DOUBLE.
-    // Where the runtime takes i64 (e.g. js_fetch_response_status),
-    // codegen converts via fptosi.
+    // Web Fetch API: Response / Headers / Request / Blob constructors +
+    // body methods + static factories. These are in
+    // `crates/perry-stdlib/src/fetch.rs`. Handles are NaN-boxed POINTER_TAG
+    // f64 values (Phase 1 of the handle-NaN-boxing unification) — codegen
+    // passes them through as DOUBLE arg kinds without conversion. Untyped
+    // property access (`request.url` where `request: any`) routes through
+    // `js_object_get_field_by_name`'s strip-tag path → `HANDLE_PROPERTY_DISPATCH`.
     // ──────────────────────────────────────────────────────────────────
     // new Response(body_ptr, status, status_text_ptr, headers_handle) -> f64
     module.declare_function("js_response_new", DOUBLE, &[I64, DOUBLE, I64, DOUBLE]);
@@ -1001,12 +1002,14 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_request_get_method", I64, &[DOUBLE]);
     module.declare_function("js_request_get_body", DOUBLE, &[DOUBLE]);
 
-    // Response body getters
-    module.declare_function("js_fetch_response_status", DOUBLE, &[I64]);
-    module.declare_function("js_fetch_response_status_text", I64, &[I64]);
-    module.declare_function("js_fetch_response_ok", DOUBLE, &[I64]);
-    module.declare_function("js_fetch_response_text", I64, &[I64]);
-    module.declare_function("js_fetch_response_json", I64, &[I64]);
+    // Response body getters — handles flow as NaN-boxed POINTER_TAG f64
+    // (Phase 1 unification, refs #421). Accessors call `handle_id` to
+    // unbox on entry; codegen no longer needs the fptosi conversion.
+    module.declare_function("js_fetch_response_status", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_fetch_response_status_text", I64, &[DOUBLE]);
+    module.declare_function("js_fetch_response_ok", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_fetch_response_text", I64, &[DOUBLE]);
+    module.declare_function("js_fetch_response_json", I64, &[DOUBLE]);
     // response.headers / .clone() / .arrayBuffer() / .blob() — all take
     // the f64 response handle.
     module.declare_function("js_response_get_headers", DOUBLE, &[DOUBLE]);

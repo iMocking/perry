@@ -55,6 +55,42 @@ struct FetchResponse {
     body: Vec<u8>,
 }
 
+/// Extract the registry id from a Web Fetch handle f64 value.
+///
+/// Web Fetch handles (Request / Response / Headers / Blob) are returned by
+/// constructors as NaN-boxed POINTER_TAG values via `js_nanbox_pointer`, so
+/// they look like pointers to the runtime's dispatchers (`js_object_get_field_by_name`,
+/// `js_native_call_method`) and route through `HANDLE_PROPERTY/METHOD_DISPATCH`
+/// for untyped property access — fixing the hono `request.url` blocker (#421).
+///
+/// This helper is tolerant during the cross-subsystem migration: it accepts both
+/// the canonical NaN-boxed form (top16 ≥ 0x7FF8) AND the legacy raw-float form
+/// (`1.0` = id 1, denormal bits, etc.). Other handle subsystems (streams / ws /
+/// net / DB) still use the legacy form until Phase 2 of the unification migrates
+/// them to NaN-boxed too.
+#[inline]
+fn handle_id(value: f64) -> usize {
+    let bits = value.to_bits();
+    let top16 = bits >> 48;
+    if top16 >= 0x7FF8 {
+        // NaN-boxed (POINTER_TAG / STRING_TAG / etc.): extract lower 48 bits.
+        (bits & 0x0000_FFFF_FFFF_FFFF) as usize
+    } else if top16 == 0 && bits != 0 {
+        // Raw integer bits as f64 (denormal-encoded handle id): use bits directly.
+        bits as usize
+    } else {
+        // Legacy float form (1.0 → 1): float-to-int truncation.
+        value as usize
+    }
+}
+
+/// NaN-box a Web Fetch handle id (registry index) into a POINTER_TAG f64
+/// for return across the FFI boundary. Pairs with `handle_id` on accessor entry.
+#[inline]
+fn handle_to_f64(id: usize) -> f64 {
+    perry_runtime::value::js_nanbox_pointer(id as i64)
+}
+
 /// Helper to extract string from StringHeader pointer
 unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
     // NaN-boxed TAG_UNDEFINED (0x7FFC_0000_0000_0001) unboxes to 0x1
@@ -145,7 +181,7 @@ pub unsafe extern "C" fn js_fetch_get(url_ptr: *const StringHeader) -> *mut perr
                 );
 
                 // Return response handle
-                let result_bits = (response_id as f64).to_bits();
+                let result_bits = handle_to_f64(response_id).to_bits();
                 queue_promise_resolution(promise_ptr, true, result_bits);
             }
             Err(e) => {
@@ -220,7 +256,7 @@ pub unsafe extern "C" fn js_fetch_get_with_auth(
                     },
                 );
 
-                let result_bits = (response_id as f64).to_bits();
+                let result_bits = handle_to_f64(response_id).to_bits();
                 queue_promise_resolution(promise_ptr, true, result_bits);
             }
             Err(e) => {
@@ -298,7 +334,7 @@ pub unsafe extern "C" fn js_fetch_post_with_auth(
                     },
                 );
 
-                let result_bits = (response_id as f64).to_bits();
+                let result_bits = handle_to_f64(response_id).to_bits();
                 queue_promise_resolution(promise_ptr, true, result_bits);
             }
             Err(e) => {
@@ -380,7 +416,7 @@ pub unsafe extern "C" fn js_fetch_post(
                 );
 
                 // Return response handle
-                let result_bits = (response_id as f64).to_bits();
+                let result_bits = handle_to_f64(response_id).to_bits();
                 queue_promise_resolution(promise_ptr, true, result_bits);
             }
             Err(e) => {
@@ -480,7 +516,7 @@ pub unsafe extern "C" fn js_fetch_with_options(
                 );
 
                 // Return response handle
-                let result_bits = (response_id as f64).to_bits();
+                let result_bits = handle_to_f64(response_id).to_bits();
                 queue_promise_resolution(promise_ptr, true, result_bits);
             }
             Err(e) => {
@@ -497,8 +533,8 @@ pub unsafe extern "C" fn js_fetch_with_options(
 /// Get response status code
 /// response.status -> number
 #[no_mangle]
-pub extern "C" fn js_fetch_response_status(handle: i64) -> f64 {
-    let response_id = handle as usize;
+pub extern "C" fn js_fetch_response_status(handle: f64) -> f64 {
+    let response_id = handle_id(handle);
     let guard = FETCH_RESPONSES.lock().unwrap();
     match guard.get(&response_id) {
         Some(resp) => resp.status as f64,
@@ -509,8 +545,8 @@ pub extern "C" fn js_fetch_response_status(handle: i64) -> f64 {
 /// Get response status text
 /// response.statusText -> string
 #[no_mangle]
-pub extern "C" fn js_fetch_response_status_text(handle: i64) -> *mut StringHeader {
-    let response_id = handle as usize;
+pub extern "C" fn js_fetch_response_status_text(handle: f64) -> *mut StringHeader {
+    let response_id = handle_id(handle);
     let guard = FETCH_RESPONSES.lock().unwrap();
     match guard.get(&response_id) {
         Some(resp) => {
@@ -523,8 +559,8 @@ pub extern "C" fn js_fetch_response_status_text(handle: i64) -> *mut StringHeade
 /// Check if response was successful (status 200-299)
 /// response.ok -> boolean
 #[no_mangle]
-pub extern "C" fn js_fetch_response_ok(handle: i64) -> f64 {
-    let response_id = handle as usize;
+pub extern "C" fn js_fetch_response_ok(handle: f64) -> f64 {
+    let response_id = handle_id(handle);
     let guard = FETCH_RESPONSES.lock().unwrap();
     match guard.get(&response_id) {
         Some(resp) => {
@@ -548,9 +584,9 @@ pub extern "C" fn js_fetch_response_ok(handle: i64) -> f64 {
 /// drain the pump — see `crates/perry-codegen/src/expr.rs`
 /// `Expr::Await` for the rationale).
 #[no_mangle]
-pub unsafe extern "C" fn js_fetch_response_text(handle: i64) -> *mut perry_runtime::Promise {
+pub unsafe extern "C" fn js_fetch_response_text(handle: f64) -> *mut perry_runtime::Promise {
     let promise = perry_runtime::js_promise_new();
-    let response_id = handle as usize;
+    let response_id = handle_id(handle);
 
     // Clone the body — JS spec says each body is readable once, but other
     // accessors (status, headers) may still be used afterwards. The Response
@@ -623,9 +659,9 @@ unsafe fn json_value_to_jsvalue(value: &serde_json::Value) -> JSValue {
 /// Get response body as JSON (parses and returns proper JS object)
 /// response.json() -> Promise<object>
 #[no_mangle]
-pub unsafe extern "C" fn js_fetch_response_json(handle: i64) -> *mut perry_runtime::Promise {
+pub unsafe extern "C" fn js_fetch_response_json(handle: f64) -> *mut perry_runtime::Promise {
     let promise = perry_runtime::js_promise_new();
-    let response_id = handle as usize;
+    let response_id = handle_id(handle);
 
     // Take (not clone) the body — consumes the FETCH_RESPONSES entry.
     let body = {
@@ -963,10 +999,11 @@ fn alloc_response(status: u16, status_text: String, headers: HeadersStore, body:
 
 // ----------------- Headers FFI -----------------
 
-/// new Headers() — returns numeric handle as f64
+/// new Headers() — returns NaN-boxed POINTER_TAG handle as f64.
+/// See `handle_to_f64` / `handle_id` for the encoding contract.
 #[no_mangle]
 pub extern "C" fn js_headers_new() -> f64 {
-    alloc_headers(HeadersStore::default()) as f64
+    handle_to_f64(alloc_headers(HeadersStore::default()))
 }
 
 #[no_mangle]
@@ -975,7 +1012,7 @@ pub unsafe extern "C" fn js_headers_set(
     key_ptr: *const StringHeader,
     value_ptr: *const StringHeader,
 ) -> f64 {
-    let id = handle as usize;
+    let id = handle_id(handle);
     let key = string_from_header(key_ptr).unwrap_or_default();
     let value = string_from_header(value_ptr).unwrap_or_default();
     if let Some(store) = HEADERS_REGISTRY.lock().unwrap().get_mut(&id) {
@@ -989,7 +1026,7 @@ pub unsafe extern "C" fn js_headers_get(
     handle: f64,
     key_ptr: *const StringHeader,
 ) -> *mut StringHeader {
-    let id = handle as usize;
+    let id = handle_id(handle);
     let key = match string_from_header(key_ptr) {
         Some(k) => k,
         None => return std::ptr::null_mut(),
@@ -1004,7 +1041,7 @@ pub unsafe extern "C" fn js_headers_get(
 
 #[no_mangle]
 pub unsafe extern "C" fn js_headers_has(handle: f64, key_ptr: *const StringHeader) -> f64 {
-    let id = handle as usize;
+    let id = handle_id(handle);
     let key = match string_from_header(key_ptr) {
         Some(k) => k,
         None => return f64::from_bits(TAG_FALSE),
@@ -1019,7 +1056,7 @@ pub unsafe extern "C" fn js_headers_has(handle: f64, key_ptr: *const StringHeade
 
 #[no_mangle]
 pub unsafe extern "C" fn js_headers_delete(handle: f64, key_ptr: *const StringHeader) -> f64 {
-    let id = handle as usize;
+    let id = handle_id(handle);
     let key = string_from_header(key_ptr).unwrap_or_default();
     if let Some(store) = HEADERS_REGISTRY.lock().unwrap().get_mut(&id) {
         store.delete(&key);
@@ -1029,7 +1066,7 @@ pub unsafe extern "C" fn js_headers_delete(handle: f64, key_ptr: *const StringHe
 
 #[no_mangle]
 pub extern "C" fn js_headers_for_each(handle: f64, callback: f64) -> f64 {
-    let id = handle as usize;
+    let id = handle_id(handle);
     let entries: Vec<(String, String)> = match HEADERS_REGISTRY.lock().unwrap().get(&id) {
         Some(s) => s.entries.clone(),
         None => return f64::from_bits(TAG_UNDEFINED),
@@ -1076,17 +1113,18 @@ pub unsafe extern "C" fn js_response_new(
     };
     let status_text = string_from_header(status_text_ptr)
         .unwrap_or_else(|| canonical_reason(status_u16).to_string());
-    let headers = if headers_handle > 0.0 {
+    let headers_id = handle_id(headers_handle);
+    let headers = if headers_id != 0 {
         HEADERS_REGISTRY
             .lock()
             .unwrap()
-            .get(&(headers_handle as usize))
+            .get(&headers_id)
             .cloned()
             .unwrap_or_default()
     } else {
         HeadersStore::default()
     };
-    alloc_response(status_u16, status_text, headers, body) as f64
+    handle_to_f64(alloc_response(status_u16, status_text, headers, body))
 }
 
 fn canonical_reason(status: u16) -> &'static str {
@@ -1110,7 +1148,7 @@ fn canonical_reason(status: u16) -> &'static str {
 /// from the response's stored header HashMap if one doesn't exist yet.
 #[no_mangle]
 pub extern "C" fn js_response_get_headers(handle: f64) -> f64 {
-    let id = handle as usize;
+    let id = handle_id(handle);
     let store = {
         let guard = FETCH_RESPONSES.lock().unwrap();
         match guard.get(&id) {
@@ -1118,13 +1156,13 @@ pub extern "C" fn js_response_get_headers(handle: f64) -> f64 {
             None => return f64::from_bits(TAG_UNDEFINED),
         }
     };
-    alloc_headers(store) as f64
+    handle_to_f64(alloc_headers(store))
 }
 
 /// response.clone() — duplicates the response (deep copy of body + headers)
 #[no_mangle]
 pub extern "C" fn js_response_clone(handle: f64) -> f64 {
-    let id = handle as usize;
+    let id = handle_id(handle);
     let cloned = {
         let guard = FETCH_RESPONSES.lock().unwrap();
         guard.get(&id).map(|resp| FetchResponse {
@@ -1140,7 +1178,7 @@ pub extern "C" fn js_response_clone(handle: f64) -> f64 {
         *id_guard += 1;
         drop(id_guard);
         FETCH_RESPONSES.lock().unwrap().insert(new_id, new_resp);
-        return new_id as f64;
+        return handle_to_f64(new_id);
     }
     f64::from_bits(TAG_UNDEFINED)
 }
@@ -1154,7 +1192,7 @@ pub extern "C" fn js_response_clone(handle: f64) -> f64 {
 #[no_mangle]
 pub unsafe extern "C" fn js_response_array_buffer(handle: f64) -> *mut perry_runtime::Promise {
     let promise = perry_runtime::js_promise_new();
-    let id = handle as usize;
+    let id = handle_id(handle);
     let body: Vec<u8> = {
         let guard = FETCH_RESPONSES.lock().unwrap();
         match guard.get(&id) {
@@ -1188,7 +1226,7 @@ pub unsafe extern "C" fn js_response_array_buffer(handle: f64) -> *mut perry_run
 #[no_mangle]
 pub unsafe extern "C" fn js_response_blob(handle: f64) -> *mut perry_runtime::Promise {
     let promise = perry_runtime::js_promise_new();
-    let id = handle as usize;
+    let id = handle_id(handle);
     let data = {
         let guard = FETCH_RESPONSES.lock().unwrap();
         match guard.get(&id) {
@@ -1211,20 +1249,24 @@ pub unsafe extern "C" fn js_response_blob(handle: f64) -> *mut perry_runtime::Pr
         }
     };
     let blob_id = alloc_blob(data);
-    perry_runtime::js_promise_resolve(promise, blob_id as f64);
+    perry_runtime::js_promise_resolve(promise, handle_to_f64(blob_id));
     promise
 }
 
 // ----------------- Blob FFI -----------------
 //
-// Blob handles are plain numeric f64 values (registry IDs into BLOB_REGISTRY),
-// matching the Response handle ABI. They must NOT be NaN-boxed; codegen passes
-// them through as DOUBLE arg kinds. See `lower_call.rs::module=="blob"` arm.
+// Blob handles flow as NaN-boxed POINTER_TAG f64 values (registry IDs into
+// BLOB_REGISTRY), matching the migrated Response/Request/Headers handle ABI
+// (Phase 1 of the handle-NaN-boxing unification). Constructors wrap return
+// values via `handle_to_f64`; accessors unbox via `handle_id` (tolerant of
+// the legacy raw-float form during the cross-subsystem transition).
+// Codegen passes them through as DOUBLE arg kinds — no `fptosi` needed.
+// See `lower_call.rs::module=="blob"` arm.
 
 /// blob.size — body byte length as f64.
 #[no_mangle]
 pub extern "C" fn js_blob_size(handle: f64) -> f64 {
-    let id = handle as usize;
+    let id = handle_id(handle);
     BLOB_REGISTRY
         .lock()
         .unwrap()
@@ -1236,7 +1278,7 @@ pub extern "C" fn js_blob_size(handle: f64) -> f64 {
 /// blob.type — content_type as `*mut StringHeader` (codegen NaN-boxes with STRING_TAG).
 #[no_mangle]
 pub unsafe extern "C" fn js_blob_type(handle: f64) -> *mut StringHeader {
-    let id = handle as usize;
+    let id = handle_id(handle);
     let ct = BLOB_REGISTRY
         .lock()
         .unwrap()
@@ -1254,7 +1296,7 @@ pub unsafe extern "C" fn js_blob_type(handle: f64) -> *mut StringHeader {
 #[no_mangle]
 pub unsafe extern "C" fn js_blob_array_buffer(handle: f64) -> *mut perry_runtime::Promise {
     let promise = perry_runtime::js_promise_new();
-    let id = handle as usize;
+    let id = handle_id(handle);
     let body: Vec<u8> = BLOB_REGISTRY
         .lock()
         .unwrap()
@@ -1290,7 +1332,7 @@ pub unsafe extern "C" fn js_blob_bytes(handle: f64) -> *mut perry_runtime::Promi
 #[no_mangle]
 pub unsafe extern "C" fn js_blob_text(handle: f64) -> *mut perry_runtime::Promise {
     let promise = perry_runtime::js_promise_new();
-    let id = handle as usize;
+    let id = handle_id(handle);
     let body: Vec<u8> = BLOB_REGISTRY
         .lock()
         .unwrap()
@@ -1316,7 +1358,7 @@ pub unsafe extern "C" fn js_blob_slice(
     end: f64,
     type_ptr: *const StringHeader,
 ) -> f64 {
-    let id = handle as usize;
+    let id = handle_id(handle);
     let body: Vec<u8> = {
         let guard = BLOB_REGISTRY.lock().unwrap();
         guard.get(&id).map(|b| b.body.clone()).unwrap_or_default()
@@ -1345,10 +1387,10 @@ pub unsafe extern "C" fn js_blob_slice(
     } else {
         string_from_header(type_ptr).unwrap_or_default()
     };
-    alloc_blob(BlobData {
+    handle_to_f64(alloc_blob(BlobData {
         body: slice,
         content_type: new_type,
-    }) as f64
+    }))
 }
 
 // ----------------- Web Streams bridge helpers (issue #237) -----------------
@@ -1380,13 +1422,110 @@ pub fn response_bytes_clone(resp_id: usize) -> Option<Vec<u8>> {
         .map(|r| r.body.clone())
 }
 
+// ----------------- Untyped property dispatch (refs #421) -----------------
+//
+// When user code accesses a property on a Web Fetch handle whose static type
+// isn't known to codegen (e.g. hono's bundled JS where TS annotations are
+// stripped: `(request) => request.url`), the codegen falls through to
+// `js_object_get_field_by_name` in perry-runtime. That dispatcher strips
+// the POINTER_TAG, sees a small id, and routes to `HANDLE_PROPERTY_DISPATCH`
+// (registered by perry-stdlib's `dispatch.rs`). The functions below let the
+// stdlib dispatcher resolve Web Fetch properties without exposing the
+// per-subsystem registries publicly.
+
+/// Try to read a property off a Request handle by registry id.
+/// Returns `None` if the id isn't a known Request — caller should try
+/// Response/Headers/Blob next.
+#[doc(hidden)]
+pub fn dispatch_request_property(req_id: usize, prop: &str) -> Option<f64> {
+    let guard = REQUEST_REGISTRY.lock().unwrap();
+    let req = guard.get(&req_id)?;
+    let bits = match prop {
+        "url" => unsafe {
+            let p = js_string_from_bytes(req.url.as_ptr(), req.url.len() as u32);
+            JSValue::string_ptr(p).bits()
+        },
+        "method" => unsafe {
+            let p = js_string_from_bytes(req.method.as_ptr(), req.method.len() as u32);
+            JSValue::string_ptr(p).bits()
+        },
+        "body" => match &req.body {
+            Some(b) => unsafe {
+                let p = js_string_from_bytes(b.as_ptr(), b.len() as u32);
+                JSValue::string_ptr(p).bits()
+            },
+            None => TAG_NULL,
+        },
+        // Other Request properties (headers, signal, mode, ...) not yet wired —
+        // return undefined so untyped access doesn't masquerade as Response/Blob.
+        _ => TAG_UNDEFINED,
+    };
+    Some(f64::from_bits(bits))
+}
+
+/// Try to read a property off a Response handle by registry id.
+/// Returns `None` if the id isn't a known Response.
+#[doc(hidden)]
+pub fn dispatch_response_property(resp_id: usize, prop: &str) -> Option<f64> {
+    let guard = FETCH_RESPONSES.lock().unwrap();
+    let resp = guard.get(&resp_id)?;
+    let bits = match prop {
+        "status" => return Some(resp.status as f64),
+        "statusText" => unsafe {
+            let p = js_string_from_bytes(resp.status_text.as_ptr(), resp.status_text.len() as u32);
+            JSValue::string_ptr(p).bits()
+        },
+        "ok" => {
+            return Some(f64::from_bits(if resp.status >= 200 && resp.status < 300 {
+                TAG_TRUE
+            } else {
+                TAG_FALSE
+            }))
+        }
+        _ => TAG_UNDEFINED,
+    };
+    Some(f64::from_bits(bits))
+}
+
+/// Try to read a property off a Headers handle by registry id.
+/// Returns `None` if the id isn't a known Headers entry.
+#[doc(hidden)]
+pub fn dispatch_headers_property(headers_id: usize, _prop: &str) -> Option<f64> {
+    let guard = HEADERS_REGISTRY.lock().unwrap();
+    guard.get(&headers_id)?;
+    // Headers has no scalar properties to expose for untyped access today —
+    // `headers.get(k)` / `.has(k)` / `.set(k, v)` etc. are method calls that
+    // route through `HANDLE_METHOD_DISPATCH`, not property gets. We still
+    // claim membership so dispatch doesn't fall through to Response/Blob.
+    Some(f64::from_bits(TAG_UNDEFINED))
+}
+
+/// Try to read a property off a Blob handle by registry id.
+/// Returns `None` if the id isn't a known Blob.
+#[doc(hidden)]
+pub fn dispatch_blob_property(blob_id: usize, prop: &str) -> Option<f64> {
+    let guard = BLOB_REGISTRY.lock().unwrap();
+    let blob = guard.get(&blob_id)?;
+    let bits = match prop {
+        "size" => return Some(blob.body.len() as f64),
+        "type" => unsafe {
+            let p = js_string_from_bytes(blob.content_type.as_ptr(), blob.content_type.len() as u32);
+            JSValue::string_ptr(p).bits()
+        },
+        _ => TAG_UNDEFINED,
+    };
+    Some(f64::from_bits(bits))
+}
+
 /// `blob.stream()` — returns a single-chunk ReadableStream handle (f64,
 /// numeric registry id) over the blob's byte payload. Closes the stream
 /// after the one chunk is delivered.
 #[no_mangle]
 pub unsafe extern "C" fn js_blob_stream(handle: f64) -> f64 {
-    let id = handle as usize;
+    let id = handle_id(handle);
     let bytes = blob_bytes_clone(id).unwrap_or_default();
+    // Streams are still a Phase 2 subsystem — keep their handle in the legacy
+    // raw-float form (`as f64`) so streams.rs's accessors continue to round-trip.
     crate::streams::alloc_readable_from_bytes(bytes) as f64
 }
 
@@ -1396,8 +1535,10 @@ pub unsafe extern "C" fn js_blob_stream(handle: f64) -> f64 {
 /// | null`).
 #[no_mangle]
 pub unsafe extern "C" fn js_response_body(handle: f64) -> f64 {
-    let id = handle as usize;
+    let id = handle_id(handle);
     match response_bytes_clone(id) {
+        // Streams are still a Phase 2 subsystem — keep their handle in the
+        // legacy raw-float form so streams.rs's accessors round-trip.
         Some(bytes) => crate::streams::alloc_readable_from_bytes(bytes) as f64,
         None => f64::from_bits(TAG_NULL),
     }
@@ -1419,7 +1560,12 @@ pub unsafe extern "C" fn js_response_static_json(value: f64) -> f64 {
     };
     let mut headers = HeadersStore::default();
     headers.set("content-type", "application/json");
-    alloc_response(200, "OK".to_string(), headers, body_str.into_bytes()) as f64
+    handle_to_f64(alloc_response(
+        200,
+        "OK".to_string(),
+        headers,
+        body_str.into_bytes(),
+    ))
 }
 
 /// Response.redirect(url, status) — static method. Allocates a redirect response.
@@ -1436,12 +1582,12 @@ pub unsafe extern "C" fn js_response_static_redirect(
     };
     let mut headers = HeadersStore::default();
     headers.set("location", &url);
-    alloc_response(
+    handle_to_f64(alloc_response(
         status_u16,
         canonical_reason(status_u16).to_string(),
         headers,
         Vec::new(),
-    ) as f64
+    ))
 }
 
 // ----------------- Request FFI -----------------
@@ -1457,11 +1603,12 @@ pub unsafe extern "C" fn js_request_new(
     let url = string_from_header(url_ptr).unwrap_or_default();
     let method = string_from_header(method_ptr).unwrap_or_else(|| "GET".to_string());
     let body = string_from_header(body_ptr);
-    let headers = if headers_handle > 0.0 {
+    let headers_id_in = handle_id(headers_handle);
+    let headers = if headers_id_in != 0 {
         HEADERS_REGISTRY
             .lock()
             .unwrap()
-            .get(&(headers_handle as usize))
+            .get(&headers_id_in)
             .cloned()
             .unwrap_or_default()
     } else {
@@ -1480,12 +1627,12 @@ pub unsafe extern "C" fn js_request_new(
             headers,
         },
     );
-    id as f64
+    handle_to_f64(id)
 }
 
 #[no_mangle]
 pub extern "C" fn js_request_get_url(handle: f64) -> *mut StringHeader {
-    let id = handle as usize;
+    let id = handle_id(handle);
     let guard = REQUEST_REGISTRY.lock().unwrap();
     match guard.get(&id) {
         Some(req) => js_string_from_bytes(req.url.as_ptr(), req.url.len() as u32),
@@ -1495,7 +1642,7 @@ pub extern "C" fn js_request_get_url(handle: f64) -> *mut StringHeader {
 
 #[no_mangle]
 pub extern "C" fn js_request_get_method(handle: f64) -> *mut StringHeader {
-    let id = handle as usize;
+    let id = handle_id(handle);
     let guard = REQUEST_REGISTRY.lock().unwrap();
     match guard.get(&id) {
         Some(req) => js_string_from_bytes(req.method.as_ptr(), req.method.len() as u32),
@@ -1506,7 +1653,7 @@ pub extern "C" fn js_request_get_method(handle: f64) -> *mut StringHeader {
 /// req.body — returns a string body or null. NaN-boxed return.
 #[no_mangle]
 pub extern "C" fn js_request_get_body(handle: f64) -> f64 {
-    let id = handle as usize;
+    let id = handle_id(handle);
     let guard = REQUEST_REGISTRY.lock().unwrap();
     match guard.get(&id) {
         Some(req) => match &req.body {

@@ -4142,6 +4142,121 @@ pub unsafe extern "C" fn js_native_call_method(
                     }
                     return f64::from_bits(JSValue::int32(-1).bits());
                 }
+                // Refs #421 — common string methods on any-typed receivers.
+                // Hono's compiled JS (and most npm packages with stripped TS
+                // types) does `request.url.indexOf("/")` where `url` is in
+                // any-typed position because the type annotation on
+                // `(request) =>` was erased at bundle time. Without these
+                // arms, the v0.5.593 catch-all throws `(string).indexOf is
+                // not a function`. Each arm extracts the search-string
+                // argument and calls the existing `js_string_*` runtime
+                // helper. Static call sites for typed string receivers keep
+                // their inline paths in `lower_string_method.rs` and don't
+                // come through this dispatcher.
+                "indexOf" | "includes" | "lastIndexOf" | "startsWith" | "endsWith"
+                | "concat" => {
+                    let arg_str = |i: usize| -> *const crate::StringHeader {
+                        if i < args_len && !args_ptr.is_null() {
+                            let v = unsafe { *args_ptr.add(i) };
+                            crate::value::js_get_string_pointer_unified(v)
+                                as *const crate::StringHeader
+                        } else {
+                            std::ptr::null()
+                        }
+                    };
+                    let needle = arg_str(0);
+                    if needle.is_null() {
+                        // Match Node: `s.indexOf(undefined)` → -1, includes → false.
+                        return match method_name {
+                            "indexOf" | "lastIndexOf" => {
+                                f64::from_bits(JSValue::int32(-1).bits())
+                            }
+                            "includes" | "startsWith" | "endsWith" => {
+                                f64::from_bits(JSValue::bool(false).bits())
+                            }
+                            "concat" => f64::from_bits(JSValue::string_ptr(s_ptr as *mut crate::StringHeader).bits()),
+                            _ => f64::from_bits(JSValue::undefined().bits()),
+                        };
+                    }
+                    return match method_name {
+                        "indexOf" => {
+                            let from = if args_len >= 2 { arg_i32(1) } else { 0 };
+                            let i = crate::string::js_string_index_of_from(s_ptr, needle, from);
+                            f64::from_bits(JSValue::int32(i).bits())
+                        }
+                        "includes" => {
+                            let from = if args_len >= 2 { arg_i32(1) } else { 0 };
+                            let i = crate::string::js_string_index_of_from(s_ptr, needle, from);
+                            f64::from_bits(JSValue::bool(i >= 0).bits())
+                        }
+                        "lastIndexOf" => {
+                            let i = crate::string::js_string_last_index_of(s_ptr, needle);
+                            f64::from_bits(JSValue::int32(i).bits())
+                        }
+                        "startsWith" => {
+                            let at = if args_len >= 2 { arg_i32(1) } else { 0 };
+                            let b = crate::string::js_string_starts_with_at(s_ptr, needle, at);
+                            f64::from_bits(JSValue::bool(b != 0).bits())
+                        }
+                        "endsWith" => {
+                            let len_i32 = unsafe { (*s_ptr).byte_len } as i32;
+                            let at = if args_len >= 2 { arg_i32(1) } else { len_i32 };
+                            let b = crate::string::js_string_ends_with_at(s_ptr, needle, at);
+                            f64::from_bits(JSValue::bool(b != 0).bits())
+                        }
+                        "concat" => {
+                            let r = crate::string::js_string_concat(s_ptr, needle);
+                            f64::from_bits(JSValue::string_ptr(r).bits())
+                        }
+                        _ => f64::from_bits(JSValue::undefined().bits()),
+                    };
+                }
+                "toUpperCase" => {
+                    let r = crate::string::js_string_to_upper_case(s_ptr);
+                    return f64::from_bits(JSValue::string_ptr(r).bits());
+                }
+                "toLowerCase" => {
+                    let r = crate::string::js_string_to_lower_case(s_ptr);
+                    return f64::from_bits(JSValue::string_ptr(r).bits());
+                }
+                "trim" => {
+                    let r = crate::string::js_string_trim(s_ptr);
+                    return f64::from_bits(JSValue::string_ptr(r).bits());
+                }
+                "trimStart" | "trimLeft" => {
+                    let r = crate::string::js_string_trim_start(s_ptr);
+                    return f64::from_bits(JSValue::string_ptr(r).bits());
+                }
+                "trimEnd" | "trimRight" => {
+                    let r = crate::string::js_string_trim_end(s_ptr);
+                    return f64::from_bits(JSValue::string_ptr(r).bits());
+                }
+                "substring" => {
+                    let len_i32 = unsafe { (*s_ptr).byte_len } as i32;
+                    let start = if args_len >= 1 { arg_i32(0) } else { 0 };
+                    let end = if args_len >= 2 { arg_i32(1) } else { len_i32 };
+                    let r = crate::string::js_string_substring(s_ptr, start, end);
+                    return f64::from_bits(JSValue::string_ptr(r).bits());
+                }
+                "repeat" => {
+                    let n = if args_len >= 1 { arg_i32(0) } else { 0 };
+                    let r = crate::string::js_string_repeat(s_ptr, n);
+                    if r.is_null() {
+                        return f64::from_bits(JSValue::undefined().bits());
+                    }
+                    return f64::from_bits(JSValue::string_ptr(r).bits());
+                }
+                "split" => {
+                    let sep = if args_len >= 1 && !args_ptr.is_null() {
+                        let v = unsafe { *args_ptr };
+                        crate::value::js_get_string_pointer_unified(v)
+                            as *const crate::StringHeader
+                    } else {
+                        std::ptr::null()
+                    };
+                    let arr = crate::string::js_string_split(s_ptr, sep);
+                    return f64::from_bits(JSValue::pointer(arr as *mut u8).bits());
+                }
                 _ => {} // not a handled string method — fall through to TypeError catch-all
             }
         }
