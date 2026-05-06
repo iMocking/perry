@@ -216,6 +216,16 @@ pub fn emit_dts(perry_version: &str) -> String {
             let signature = render_signature(e);
             if e.name == "default" {
                 let _ = writeln!(out, "  export default function {};", signature);
+            } else if is_ts_reserved_word(e.name) {
+                // Reserved words (e.g. `axios.delete`) can't appear as
+                // a function declaration's name — `tsc` rejects
+                // `export function delete(...)` with TS1359 (#526).
+                // Declare under an underscored alias and re-export with
+                // the original name; the `as <reserved>` rename slot
+                // accepts arbitrary identifiers.
+                let alias = format!("_{}", e.name);
+                let _ = writeln!(out, "  function {}{};", alias, signature);
+                let _ = writeln!(out, "  export {{ {} as {} }};", alias, e.name);
             } else {
                 let _ = writeln!(out, "  export function {}{};", ts_ident(e.name), signature);
             }
@@ -353,6 +363,67 @@ fn render_type(ty: &TypeSpec) -> &'static str {
     }
 }
 
+/// TS keywords that can't appear as a function declaration's name.
+/// Property accesses (`obj.delete()`) accept these, but a top-level
+/// `export function delete(...)` is rejected by `tsc` with TS1359 — so
+/// the .d.ts emitter routes around it via `function _delete(...); export
+/// { _delete as delete };` (the `as <name>` rename slot accepts
+/// arbitrary identifiers including reserved words). #526.
+fn is_ts_reserved_word(s: &str) -> bool {
+    matches!(
+        s,
+        // Strict-mode reserved words.
+        "break"
+            | "case"
+            | "catch"
+            | "class"
+            | "const"
+            | "continue"
+            | "debugger"
+            | "default"
+            | "delete"
+            | "do"
+            | "else"
+            | "enum"
+            | "export"
+            | "extends"
+            | "false"
+            | "finally"
+            | "for"
+            | "function"
+            | "if"
+            | "import"
+            | "in"
+            | "instanceof"
+            | "new"
+            | "null"
+            | "return"
+            | "super"
+            | "switch"
+            | "this"
+            | "throw"
+            | "true"
+            | "try"
+            | "typeof"
+            | "var"
+            | "void"
+            | "while"
+            | "with"
+            | "yield"
+            // Strict-mode-only contextual keywords. `tsc` rejects most
+            // of these as function names too.
+            | "implements"
+            | "interface"
+            | "let"
+            | "package"
+            | "private"
+            | "protected"
+            | "public"
+            | "static"
+            | "await"
+    )
+}
+
 /// TypeScript identifiers can't start with a digit and forbid most
 /// punctuation. Manifest names are already valid identifiers in
 /// practice; this is just defensive in case a future entry adds one.
@@ -450,6 +521,64 @@ mod tests {
             "bcrypt.hash regressed to loose any signature\nblock: {}",
             block
         );
+    }
+
+    /// #526 acceptance: a method named after a TS reserved word must
+    /// not surface as `export function <reserved>(...)` — `tsc` errors
+    /// out with TS1359. The emitter routes through the
+    /// `function _delete; export { _delete as delete }` alias pattern
+    /// so a fresh `perry init` project's `tsc -p .` succeeds.
+    #[test]
+    fn dts_axios_delete_does_not_use_reserved_word_as_fn_name() {
+        let dts = emit_dts("test");
+        let block_start = dts.find("declare module \"axios\"").expect("axios block");
+        let after = &dts[block_start..];
+        let block_end = after.find("\n}\n").expect("block end");
+        let block = &after[..block_end];
+        assert!(
+            !block.contains("export function delete("),
+            "axios.delete must not be emitted as `export function delete(` (TS1359)\nblock: {}",
+            block
+        );
+        assert!(
+            block.contains("function _delete(") && block.contains("_delete as delete"),
+            "axios.delete should use the `function _delete; export {{ _delete as delete }}` \
+             alias pattern\nblock: {}",
+            block
+        );
+    }
+
+    /// Defense-in-depth for #526: every reserved word the emitter
+    /// recognizes should round-trip through the alias pattern, so
+    /// future manifest additions (e.g. `axios.try`, `axios.new`) don't
+    /// silently re-break the .d.ts. We synthesize the test by walking
+    /// the live manifest — any module-level function whose name is a
+    /// reserved word must not appear under `export function <name>(`.
+    #[test]
+    fn dts_no_reserved_word_function_declarations() {
+        let dts = emit_dts("test");
+        for entry in API_MANIFEST {
+            if !matches!(
+                entry.kind,
+                ApiKind::Method {
+                    has_receiver: false,
+                    class_filter: None,
+                }
+            ) {
+                continue;
+            }
+            if !is_ts_reserved_word(entry.name) {
+                continue;
+            }
+            let bad = format!("export function {}(", entry.name);
+            assert!(
+                !dts.contains(&bad),
+                "{} module: reserved-word method `{}` leaked as `export function {}(`",
+                entry.module,
+                entry.name,
+                entry.name
+            );
+        }
     }
 
     /// uuid.v4() is no-args and returns a string — verify the renderer

@@ -1,6 +1,6 @@
 // Auto-generated from Perry's API manifest (#465). Do not edit by hand.
 // Source: perry-api-manifest::API_MANIFEST
-// Perry version: 0.5.602
+// Perry version: 0.5.606
 // Coverage: 673 entries across 68 modules
 
 declare module "argon2" {
@@ -21,7 +21,8 @@ declare module "axios" {
   /** stdlib */
   export default function (...args: any[]): any;
   /** stdlib */
-  export function delete(...args: any[]): any;
+  function _delete(...args: any[]): any;
+  export { _delete as delete };
   /** stdlib */
   export function get(...args: any[]): any;
   /** stdlib */
