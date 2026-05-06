@@ -288,8 +288,7 @@ pub extern "C" fn js_sharp_to_buffer(handle: Handle) -> *mut Promise {
             match sharp.image.write_to(&mut buffer, sharp.format) {
                 Ok(_) => {
                     let bytes = buffer.into_inner();
-                    let encoded =
-                        base64::engine::general_purpose::STANDARD.encode(&bytes);
+                    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
                     promise.resolve_string(&encoded);
                 }
                 Err(e) => promise.reject_string(&format!("Failed to encode image: {}", e)),
@@ -352,7 +351,8 @@ mod tests {
     use image::{ImageBuffer, Rgba};
 
     fn make_handle(w: u32, h: u32) -> Handle {
-        let buf: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::from_pixel(w, h, Rgba([255, 0, 0, 255]));
+        let buf: ImageBuffer<Rgba<u8>, Vec<u8>> =
+            ImageBuffer::from_pixel(w, h, Rgba([255, 0, 0, 255]));
         let img = DynamicImage::ImageRgba8(buf);
         register_handle(SharpHandle {
             image: img,

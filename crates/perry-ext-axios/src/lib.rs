@@ -31,7 +31,11 @@ unsafe fn read_str(ptr: *const StringHeader) -> Option<String> {
 /// the original perry-stdlib axios — without the explicit
 /// NaN-boxing, the awaiter sees a subnormal float that decays
 /// to `undefined` on `r.status` accesses).
-fn run_request<F>(method: &'static str, url_or_err: Result<String, &'static str>, build: F) -> *mut Promise
+fn run_request<F>(
+    method: &'static str,
+    url_or_err: Result<String, &'static str>,
+    build: F,
+) -> *mut Promise
 where
     F: FnOnce(reqwest::Client, String) -> reqwest::RequestBuilder + Send + 'static,
 {
@@ -46,8 +50,8 @@ where
     };
 
     spawn_blocking(move || {
-        let result: Result<AxiosResponseHandle, String> =
-            tokio::runtime::Handle::current().block_on(async move {
+        let result: Result<AxiosResponseHandle, String> = tokio::runtime::Handle::current()
+            .block_on(async move {
                 let client = reqwest::Client::new();
                 let request = build(client, url);
                 let response = request

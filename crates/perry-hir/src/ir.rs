@@ -44,7 +44,6 @@ pub fn typed_array_kind_for_name(name: &str) -> Option<u8> {
 /// import from `perry_api_manifest` directly.
 pub const NATIVE_MODULES: &[&str] = perry_api_manifest::NATIVE_MODULES;
 
-
 /// Check if a module path refers to a native stdlib module
 pub fn is_native_module(path: &str) -> bool {
     let normalized = path.strip_prefix("node:").unwrap_or(path);

@@ -86,10 +86,8 @@ enum PendingWsEvent {
 }
 
 lazy_static! {
-    static ref WS_CONNECTIONS: Mutex<HashMap<usize, WsConnection>> =
-        Mutex::new(HashMap::new());
-    static ref WS_CLIENT_PARENT_SERVER: Mutex<HashMap<usize, Handle>> =
-        Mutex::new(HashMap::new());
+    static ref WS_CONNECTIONS: Mutex<HashMap<usize, WsConnection>> = Mutex::new(HashMap::new());
+    static ref WS_CLIENT_PARENT_SERVER: Mutex<HashMap<usize, Handle>> = Mutex::new(HashMap::new());
     static ref NEXT_WS_ID: Mutex<usize> = Mutex::new(1);
     static ref WS_CLIENT_LISTENERS: Mutex<HashMap<usize, WsClientListeners>> =
         Mutex::new(HashMap::new());
@@ -108,8 +106,7 @@ fn ensure_gc_scanner_registered() {
 fn scan_ws_roots(mark: &mut dyn FnMut(f64)) {
     let mark_cb = |cb: i64, mark: &mut dyn FnMut(f64)| {
         if cb != 0 {
-            let boxed =
-                f64::from_bits(POINTER_TAG | (cb as u64 & POINTER_MASK));
+            let boxed = f64::from_bits(POINTER_TAG | (cb as u64 & POINTER_MASK));
             mark(boxed);
         }
     };
@@ -143,9 +140,7 @@ fn push_ws_event(ev: PendingWsEvent) {
 /// # Safety
 /// `url_ptr` must be null or a Perry-runtime `StringHeader`.
 #[no_mangle]
-pub unsafe extern "C" fn js_ws_connect(
-    url_ptr: *const StringHeader,
-) -> *mut perry_ffi::Promise {
+pub unsafe extern "C" fn js_ws_connect(url_ptr: *const StringHeader) -> *mut perry_ffi::Promise {
     ensure_gc_scanner_registered();
     let promise = perry_ffi::JsPromise::new();
     let raw = promise.as_raw();
@@ -154,8 +149,8 @@ pub unsafe extern "C" fn js_ws_connect(
         return raw;
     };
     spawn_blocking(move || {
-        let result = tokio::runtime::Handle::current()
-            .block_on(async move { connect_async(&url).await });
+        let result =
+            tokio::runtime::Handle::current().block_on(async move { connect_async(&url).await });
         match result {
             Ok((ws_stream, _resp)) => {
                 let id = setup_client_io(ws_stream);
@@ -205,8 +200,8 @@ pub extern "C" fn js_ws_connect_start(url_nanboxed: f64) -> f64 {
         },
     );
     spawn_blocking(move || {
-        let outcome = tokio::runtime::Handle::current()
-            .block_on(async move { connect_async(&url).await });
+        let outcome =
+            tokio::runtime::Handle::current().block_on(async move { connect_async(&url).await });
         match outcome {
             Ok((ws_stream, _)) => {
                 if let Some(c) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id) {
@@ -329,7 +324,9 @@ fn drive_client_io<S>(
 /// `message_ptr` must be null or a Perry-runtime `StringHeader`.
 #[no_mangle]
 pub unsafe extern "C" fn js_ws_send(handle: i64, message_ptr: *const StringHeader) {
-    let Some(msg) = read_str(message_ptr) else { return };
+    let Some(msg) = read_str(message_ptr) else {
+        return;
+    };
     let id = handle as usize;
     if let Some(c) = WS_CONNECTIONS.lock().unwrap().get_mut(&id) {
         let _ = c.sender.send(WsCommand::Send(msg));
@@ -348,12 +345,11 @@ pub extern "C" fn js_ws_close(handle: i64) {
 /// # Safety
 /// `message_ptr` must be null or a Perry-runtime `StringHeader`.
 #[no_mangle]
-pub unsafe extern "C" fn js_ws_send_to_client(
-    handle_f64: f64,
-    message_ptr: *const StringHeader,
-) {
+pub unsafe extern "C" fn js_ws_send_to_client(handle_f64: f64, message_ptr: *const StringHeader) {
     let id = handle_f64 as i64 as usize;
-    let Some(msg) = read_str(message_ptr) else { return };
+    let Some(msg) = read_str(message_ptr) else {
+        return;
+    };
     if let Some(c) = WS_CONNECTIONS.lock().unwrap().get_mut(&id) {
         let _ = c.sender.send(WsCommand::Send(msg));
     }
@@ -409,10 +405,7 @@ pub extern "C" fn js_ws_receive(handle: i64) -> *mut StringHeader {
 /// `timeout_ms` milliseconds for a buffered message; returns the
 /// message string or null on timeout.
 #[no_mangle]
-pub unsafe extern "C" fn js_ws_wait_for_message(
-    handle: i64,
-    timeout_ms: f64,
-) -> *mut StringHeader {
+pub unsafe extern "C" fn js_ws_wait_for_message(handle: i64, timeout_ms: f64) -> *mut StringHeader {
     let id = handle as usize;
     let timeout = std::time::Duration::from_millis(timeout_ms.max(0.0) as u64);
     let start = std::time::Instant::now();
@@ -686,9 +679,7 @@ pub extern "C" fn js_ws_process_pending() -> i32 {
                 let listeners = listeners_on_server(server_handle, "connection");
                 for cb in listeners {
                     if cb != 0 {
-                        let closure = unsafe {
-                            JsClosure::from_raw(cb as *const RawClosureHeader)
-                        };
+                        let closure = unsafe { JsClosure::from_raw(cb as *const RawClosureHeader) };
                         // Pass client_id as f64 so user handler can
                         // pass it back to js_ws_send_to_client etc.
                         let _ = unsafe { closure.call1(client_id as f64) };
@@ -700,14 +691,11 @@ pub extern "C" fn js_ws_process_pending() -> i32 {
                 let listeners = listeners_on_client(ws_id, "message");
                 for cb in listeners {
                     if cb != 0 {
-                        let closure = unsafe {
-                            JsClosure::from_raw(cb as *const RawClosureHeader)
-                        };
+                        let closure = unsafe { JsClosure::from_raw(cb as *const RawClosureHeader) };
                         let s = alloc_string(&text);
                         let _ = unsafe {
-                            closure.call1(f64::from_bits(
-                                JsValue::from_string_ptr(s.as_raw()).bits(),
-                            ))
+                            closure
+                                .call1(f64::from_bits(JsValue::from_string_ptr(s.as_raw()).bits()))
                         };
                         fired += 1;
                     }
@@ -717,9 +705,7 @@ pub extern "C" fn js_ws_process_pending() -> i32 {
                 let listeners = listeners_on_client(ws_id, "close");
                 for cb in listeners {
                     if cb != 0 {
-                        let closure = unsafe {
-                            JsClosure::from_raw(cb as *const RawClosureHeader)
-                        };
+                        let closure = unsafe { JsClosure::from_raw(cb as *const RawClosureHeader) };
                         let _ = unsafe { closure.call0() };
                         fired += 1;
                     }
@@ -732,14 +718,11 @@ pub extern "C" fn js_ws_process_pending() -> i32 {
                 let listeners = listeners_on_client(ws_id, "error");
                 for cb in listeners {
                     if cb != 0 {
-                        let closure = unsafe {
-                            JsClosure::from_raw(cb as *const RawClosureHeader)
-                        };
+                        let closure = unsafe { JsClosure::from_raw(cb as *const RawClosureHeader) };
                         let s = alloc_string(&err);
                         let _ = unsafe {
-                            closure.call1(f64::from_bits(
-                                JsValue::from_string_ptr(s.as_raw()).bits(),
-                            ))
+                            closure
+                                .call1(f64::from_bits(JsValue::from_string_ptr(s.as_raw()).bits()))
                         };
                         fired += 1;
                     }
@@ -749,14 +732,11 @@ pub extern "C" fn js_ws_process_pending() -> i32 {
                 let listeners = listeners_on_server(server_handle, "error");
                 for cb in listeners {
                     if cb != 0 {
-                        let closure = unsafe {
-                            JsClosure::from_raw(cb as *const RawClosureHeader)
-                        };
+                        let closure = unsafe { JsClosure::from_raw(cb as *const RawClosureHeader) };
                         let s = alloc_string(&err);
                         let _ = unsafe {
-                            closure.call1(f64::from_bits(
-                                JsValue::from_string_ptr(s.as_raw()).bits(),
-                            ))
+                            closure
+                                .call1(f64::from_bits(JsValue::from_string_ptr(s.as_raw()).bits()))
                         };
                         fired += 1;
                     }
@@ -766,9 +746,7 @@ pub extern "C" fn js_ws_process_pending() -> i32 {
                 let listeners = listeners_on_server(server_handle, "listening");
                 for cb in listeners {
                     if cb != 0 {
-                        let closure = unsafe {
-                            JsClosure::from_raw(cb as *const RawClosureHeader)
-                        };
+                        let closure = unsafe { JsClosure::from_raw(cb as *const RawClosureHeader) };
                         let _ = unsafe { closure.call0() };
                         fired += 1;
                     }
@@ -787,11 +765,7 @@ pub extern "C" fn js_ws_has_pending() -> i32 {
     if WS_ACTIVE_SERVERS.load(Ordering::Relaxed) > 0 {
         return 1;
     }
-    let any_open = WS_CONNECTIONS
-        .lock()
-        .unwrap()
-        .values()
-        .any(|c| c.is_open);
+    let any_open = WS_CONNECTIONS.lock().unwrap().values().any(|c| c.is_open);
     if any_open {
         1
     } else {

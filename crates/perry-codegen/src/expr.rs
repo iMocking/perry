@@ -3417,8 +3417,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let undef_idx = ctx.new_block("pget.recv_undef_return");
             let throw_label = ctx.block_label(throw_idx);
             let undef_label = ctx.block_label(undef_idx);
-            ctx.block()
-                .cond_br(&is_nullish, &throw_label, &undef_label);
+            ctx.block().cond_br(&is_nullish, &throw_label, &undef_label);
 
             // Throw path: helper aborts the process; block ends with
             // `unreachable` because the helper's `-> !` return is
@@ -6354,8 +6353,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                         "log" | "info" | "warn" | "error" | "debug"
                     )
                 {
-                    let mut acc_handle =
-                        ctx.block().call(I64, "js_array_alloc", &[(I32, "0")]);
+                    let mut acc_handle = ctx.block().call(I64, "js_array_alloc", &[(I32, "0")]);
                     for a in args {
                         match a {
                             CallArg::Expr(e) => {

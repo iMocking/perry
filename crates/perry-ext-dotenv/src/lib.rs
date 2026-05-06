@@ -145,10 +145,12 @@ mod tests {
 
     #[test]
     fn unwraps_quoted_values() {
-        let vars = parse_dotenv_content(r#"DOUBLE="hello"
+        let vars = parse_dotenv_content(
+            r#"DOUBLE="hello"
 SINGLE='world'
 ESCAPED="line1\nline2"
-"#);
+"#,
+        );
         assert_eq!(vars.get("DOUBLE"), Some(&"hello".to_string()));
         assert_eq!(vars.get("SINGLE"), Some(&"world".to_string()));
         assert_eq!(vars.get("ESCAPED"), Some(&"line1\nline2".to_string()));
@@ -161,11 +163,10 @@ ESCAPED="line1\nline2"
         // wrapper's only contact with the runtime — string read +
         // string alloc — survives end-to-end.
         let content = perry_ffi::alloc_string("KEY=value\n# c\nOTHER=42\n");
-        let json_handle = unsafe {
-            super::js_dotenv_parse(content.as_raw() as *const _)
-        };
+        let json_handle = unsafe { super::js_dotenv_parse(content.as_raw() as *const _) };
         let json_handle_wrapped = unsafe { perry_ffi::JsString::from_raw(json_handle) };
-        let json_str = perry_ffi::read_string(json_handle_wrapped).expect("parse returned non-null");
+        let json_str =
+            perry_ffi::read_string(json_handle_wrapped).expect("parse returned non-null");
         // serde_json hash-map order isn't guaranteed; check substrings.
         assert!(json_str.contains("\"KEY\":\"value\""), "got: {}", json_str);
         assert!(json_str.contains("\"OTHER\":\"42\""), "got: {}", json_str);

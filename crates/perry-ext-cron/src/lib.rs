@@ -77,9 +77,8 @@ fn scan_cron_roots(mark: &mut dyn FnMut(f64)) {
     if let Ok(q) = CRON_TIMERS.lock() {
         for timer in q.iter() {
             if !timer.cleared && timer.callback != 0 {
-                let boxed = f64::from_bits(
-                    POINTER_TAG | (timer.callback as u64 & 0x0000_FFFF_FFFF_FFFF),
-                );
+                let boxed =
+                    f64::from_bits(POINTER_TAG | (timer.callback as u64 & 0x0000_FFFF_FFFF_FFFF));
                 mark(boxed);
             }
         }
@@ -193,10 +192,7 @@ pub unsafe extern "C" fn js_cron_validate(expr_ptr: *const StringHeader) -> f64 
 /// # Safety
 /// `expr_ptr` must be null or a Perry-runtime `StringHeader`.
 #[no_mangle]
-pub unsafe extern "C" fn js_cron_schedule(
-    expr_ptr: *const StringHeader,
-    callback: i64,
-) -> Handle {
+pub unsafe extern "C" fn js_cron_schedule(expr_ptr: *const StringHeader, callback: i64) -> Handle {
     ensure_gc_scanner_registered();
 
     let expr = match read_str(expr_ptr) {
@@ -309,10 +305,7 @@ pub extern "C" fn js_cron_next_date(handle: Handle) -> *mut StringHeader {
 }
 
 #[no_mangle]
-pub extern "C" fn js_cron_next_dates(
-    handle: Handle,
-    count: f64,
-) -> *mut perry_ffi::ArrayHeader {
+pub extern "C" fn js_cron_next_dates(handle: Handle, count: f64) -> *mut perry_ffi::ArrayHeader {
     let mut result = unsafe { js_array_alloc(0) };
     let count = count as usize;
     if let Some(job) = get_handle::<CronJobHandle>(handle) {

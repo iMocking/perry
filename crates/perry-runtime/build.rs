@@ -328,7 +328,12 @@ fn emit_stub(
         writeln!(out, "#[no_mangle]").unwrap();
         match ret_ty {
             Some(ty) => {
-                writeln!(out, "pub extern \"C\" fn {}({}) -> {} {{", name, args_str, ty).unwrap();
+                writeln!(
+                    out,
+                    "pub extern \"C\" fn {}({}) -> {} {{",
+                    name, args_str, ty
+                )
+                .unwrap();
                 out.push_str(&warn_call);
                 writeln!(out, "    {}", default).unwrap();
                 writeln!(out, "}}").unwrap();

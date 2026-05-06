@@ -86,7 +86,9 @@ pub fn run(args: InitArgs, format: OutputFormat, _use_color: bool) -> Result<()>
     let github_owner = args
         .github_owner
         .unwrap_or_else(|| "your-github-handle".to_string());
-    let copyright = args.copyright_holder.unwrap_or_else(|| github_owner.clone());
+    let copyright = args
+        .copyright_holder
+        .unwrap_or_else(|| github_owner.clone());
     let description = args
         .description
         .unwrap_or_else(|| format!("Native bindings for {} for the Perry compiler.", crate_name));
@@ -97,7 +99,10 @@ pub fn run(args: InitArgs, format: OutputFormat, _use_color: bool) -> Result<()>
     // commented placeholder for the user to fill.
     let upstream_dep_line = match args.upstream_dep.as_deref() {
         Some(s) if !s.is_empty() => s.to_string(),
-        _ => format!("# TODO: add the upstream Rust crate to wrap, e.g. `{} = \"1.0\"`", crate_name),
+        _ => format!(
+            "# TODO: add the upstream Rust crate to wrap, e.g. `{} = \"1.0\"`",
+            crate_name
+        ),
     };
 
     let subs = Subs {
@@ -171,8 +176,7 @@ fn render(template: &str, subs: &Subs) -> String {
 
 fn write_template(path: &Path, template: &str, subs: &Subs) -> Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
     fs::write(path, render(template, subs))
         .with_context(|| format!("writing {}", path.display()))?;
@@ -181,8 +185,7 @@ fn write_template(path: &Path, template: &str, subs: &Subs) -> Result<()> {
 
 fn write_raw(path: &Path, content: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
     fs::write(path, content).with_context(|| format!("writing {}", path.display()))?;
     Ok(())

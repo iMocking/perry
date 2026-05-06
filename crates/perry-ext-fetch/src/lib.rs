@@ -463,13 +463,10 @@ pub unsafe extern "C" fn js_fetch_stream_start(
     let id = *id_guard;
     *id_guard += 1;
     drop(id_guard);
-    STREAM_HANDLES.lock().unwrap().insert(
-        id,
-        StreamState {
-            rx,
-            status: 0,
-        },
-    );
+    STREAM_HANDLES
+        .lock()
+        .unwrap()
+        .insert(id, StreamState { rx, status: 0 });
 
     spawn_blocking(move || {
         tokio::runtime::Handle::current().block_on(async move {
@@ -565,7 +562,9 @@ pub unsafe extern "C" fn js_headers_set(
     value_ptr: *const StringHeader,
 ) -> f64 {
     let id = handle as usize;
-    let Some(key) = read_str(key_ptr) else { return 0.0 };
+    let Some(key) = read_str(key_ptr) else {
+        return 0.0;
+    };
     let value = read_str(value_ptr).unwrap_or_default();
     let mut g = HEADERS_HANDLES.lock().unwrap();
     if let Some(h) = g.get_mut(&id) {
@@ -599,7 +598,9 @@ pub unsafe extern "C" fn js_headers_get(
 #[no_mangle]
 pub unsafe extern "C" fn js_headers_has(handle: f64, key_ptr: *const StringHeader) -> f64 {
     let id = handle as usize;
-    let Some(key) = read_str(key_ptr) else { return 0.0 };
+    let Some(key) = read_str(key_ptr) else {
+        return 0.0;
+    };
     let g = HEADERS_HANDLES.lock().unwrap();
     if g.get(&id)
         .map(|h| h.contains_key(&key.to_lowercase()))
@@ -616,7 +617,9 @@ pub unsafe extern "C" fn js_headers_has(handle: f64, key_ptr: *const StringHeade
 #[no_mangle]
 pub unsafe extern "C" fn js_headers_delete(handle: f64, key_ptr: *const StringHeader) -> f64 {
     let id = handle as usize;
-    let Some(key) = read_str(key_ptr) else { return 0.0 };
+    let Some(key) = read_str(key_ptr) else {
+        return 0.0;
+    };
     let mut g = HEADERS_HANDLES.lock().unwrap();
     if let Some(h) = g.get_mut(&id) {
         if h.remove(&key.to_lowercase()).is_some() {
@@ -648,9 +651,8 @@ pub extern "C" fn js_headers_for_each(handle: f64, callback: f64) -> f64 {
         let value_v = JsValue::from_string_ptr(value_str.as_raw());
         let closure = unsafe { JsClosure::from_raw(cb_ptr) };
         // Web Fetch order is (value, key) per the spec.
-        let _ = unsafe {
-            closure.call2(f64::from_bits(value_v.bits()), f64::from_bits(key_v.bits()))
-        };
+        let _ =
+            unsafe { closure.call2(f64::from_bits(value_v.bits()), f64::from_bits(key_v.bits())) };
         let _ = (key_v, value_v); // silence warnings if unused
     }
     1.0
@@ -776,10 +778,7 @@ pub unsafe extern "C" fn js_response_static_json(value: f64) -> f64 {
     let v = JsValue::from_bits(value.to_bits());
     let body = perry_ffi::json_stringify(v).unwrap_or_default();
     let mut headers = HashMap::new();
-    headers.insert(
-        "content-type".to_string(),
-        "application/json".to_string(),
-    );
+    headers.insert("content-type".to_string(), "application/json".to_string());
     store_response(FetchResponse {
         status: 200,
         status_text: "OK".to_string(),
@@ -900,8 +899,16 @@ pub unsafe extern "C" fn js_blob_slice(
     let g = BLOB_HANDLES.lock().unwrap();
     let Some(orig) = g.get(&id) else { return 0.0 };
     let len = orig.bytes.len() as f64;
-    let s = if start < 0.0 { (len + start).max(0.0) } else { start.min(len) } as usize;
-    let e = if end < 0.0 { (len + end).max(0.0) } else { end.min(len) } as usize;
+    let s = if start < 0.0 {
+        (len + start).max(0.0)
+    } else {
+        start.min(len)
+    } as usize;
+    let e = if end < 0.0 {
+        (len + end).max(0.0)
+    } else {
+        end.min(len)
+    } as usize;
     let slice_bytes = if e > s {
         orig.bytes[s..e].to_vec()
     } else {

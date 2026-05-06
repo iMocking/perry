@@ -44,10 +44,7 @@ extern "C" {
     fn perry_ffi_promise_resolve_bits(promise: *mut Promise, bits: u64);
     fn perry_ffi_promise_reject_bits(promise: *mut Promise, bits: u64);
     fn perry_ffi_spawn_blocking(ctx: *mut c_void, invoke: extern "C" fn(*mut c_void));
-    fn perry_ffi_spawn_blocking_with_reactor(
-        ctx: *mut c_void,
-        invoke: extern "C" fn(*mut c_void),
-    );
+    fn perry_ffi_spawn_blocking_with_reactor(ctx: *mut c_void, invoke: extern "C" fn(*mut c_void));
 }
 
 // NaN-box tags. These values are part of perry-runtime's stable
@@ -116,7 +113,11 @@ impl JsPromise {
     /// flows — this matches what perry-stdlib's bcrypt has been
     /// doing since v0.5.0).
     pub fn resolve_bool(self, b: bool) {
-        let bits = if b { 1.0f64.to_bits() } else { 0.0f64.to_bits() };
+        let bits = if b {
+            1.0f64.to_bits()
+        } else {
+            0.0f64.to_bits()
+        };
         unsafe { perry_ffi_promise_resolve_bits(self.0, bits) };
     }
 

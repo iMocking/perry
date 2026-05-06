@@ -152,10 +152,16 @@ pub unsafe extern "C" fn js_sqlite_open(filename_ptr: *const StringHeader) -> Ha
 /// `sql_ptr` must be null or a Perry-runtime `StringHeader`.
 #[no_mangle]
 pub unsafe extern "C" fn js_sqlite_exec(db_handle: Handle, sql_ptr: *const StringHeader) -> i32 {
-    let Some(sql) = read_str(sql_ptr) else { return 0 };
+    let Some(sql) = read_str(sql_ptr) else {
+        return 0;
+    };
     if let Some(db) = get_handle::<SqliteDbHandle>(db_handle) {
         if let Ok(conn) = db.conn.lock() {
-            return if conn.execute_batch(&sql).is_ok() { 1 } else { 0 };
+            return if conn.execute_batch(&sql).is_ok() {
+                1
+            } else {
+                0
+            };
         }
     }
     0
@@ -172,7 +178,9 @@ pub unsafe extern "C" fn js_sqlite_prepare(
     db_handle: Handle,
     sql_ptr: *const StringHeader,
 ) -> Handle {
-    let Some(sql) = read_str(sql_ptr) else { return -1 };
+    let Some(sql) = read_str(sql_ptr) else {
+        return -1;
+    };
     if let Some(db) = get_handle::<SqliteDbHandle>(db_handle) {
         if let Ok(conn) = db.conn.lock() {
             if conn.prepare(&sql).is_ok() {
@@ -250,8 +258,7 @@ pub unsafe extern "C" fn js_sqlite_stmt_get(
                         .iter()
                         .map(|s| s.to_string())
                         .collect();
-                    let column_refs: Vec<&str> =
-                        column_names.iter().map(String::as_str).collect();
+                    let column_refs: Vec<&str> = column_names.iter().map(String::as_str).collect();
                     let (packed_keys, shape_id) = build_object_shape(&column_refs);
 
                     let mut rows = prepared.query(param_refs.as_slice());
@@ -264,8 +271,7 @@ pub unsafe extern "C" fn js_sqlite_stmt_get(
                                 packed_keys.len() as u32,
                             );
                             for (idx, _) in column_names.iter().enumerate() {
-                                let value: SqliteValue =
-                                    row.get(idx).unwrap_or(SqliteValue::Null);
+                                let value: SqliteValue = row.get(idx).unwrap_or(SqliteValue::Null);
                                 js_object_set_field(
                                     obj,
                                     idx as u32,
@@ -307,8 +313,7 @@ pub unsafe extern "C" fn js_sqlite_stmt_all(
                         .iter()
                         .map(|s| s.to_string())
                         .collect();
-                    let column_refs: Vec<&str> =
-                        column_names.iter().map(String::as_str).collect();
+                    let column_refs: Vec<&str> = column_names.iter().map(String::as_str).collect();
                     let (packed_keys, shape_id) = build_object_shape(&column_refs);
 
                     let mut rows = prepared.query(param_refs.as_slice());
@@ -321,8 +326,7 @@ pub unsafe extern "C" fn js_sqlite_stmt_all(
                                 packed_keys.len() as u32,
                             );
                             for (idx, _) in column_names.iter().enumerate() {
-                                let value: SqliteValue =
-                                    row.get(idx).unwrap_or(SqliteValue::Null);
+                                let value: SqliteValue = row.get(idx).unwrap_or(SqliteValue::Null);
                                 js_object_set_field(
                                     obj,
                                     idx as u32,
@@ -396,7 +400,11 @@ pub unsafe extern "C" fn js_sqlite_pragma(
 pub extern "C" fn js_sqlite_begin_transaction(db_handle: Handle) -> i32 {
     if let Some(db) = get_handle::<SqliteDbHandle>(db_handle) {
         if let Ok(conn) = db.conn.lock() {
-            return if conn.execute("BEGIN TRANSACTION", []).is_ok() { 1 } else { 0 };
+            return if conn.execute("BEGIN TRANSACTION", []).is_ok() {
+                1
+            } else {
+                0
+            };
         }
     }
     0
@@ -406,7 +414,11 @@ pub extern "C" fn js_sqlite_begin_transaction(db_handle: Handle) -> i32 {
 pub extern "C" fn js_sqlite_commit(db_handle: Handle) -> i32 {
     if let Some(db) = get_handle::<SqliteDbHandle>(db_handle) {
         if let Ok(conn) = db.conn.lock() {
-            return if conn.execute("COMMIT", []).is_ok() { 1 } else { 0 };
+            return if conn.execute("COMMIT", []).is_ok() {
+                1
+            } else {
+                0
+            };
         }
     }
     0
@@ -416,7 +428,11 @@ pub extern "C" fn js_sqlite_commit(db_handle: Handle) -> i32 {
 pub extern "C" fn js_sqlite_rollback(db_handle: Handle) -> i32 {
     if let Some(db) = get_handle::<SqliteDbHandle>(db_handle) {
         if let Ok(conn) = db.conn.lock() {
-            return if conn.execute("ROLLBACK", []).is_ok() { 1 } else { 0 };
+            return if conn.execute("ROLLBACK", []).is_ok() {
+                1
+            } else {
+                0
+            };
         }
     }
     0
@@ -426,7 +442,11 @@ pub extern "C" fn js_sqlite_rollback(db_handle: Handle) -> i32 {
 /// the registry; subsequent uses become no-ops.
 #[no_mangle]
 pub extern "C" fn js_sqlite_close(db_handle: Handle) -> i32 {
-    if drop_handle(db_handle) { 1 } else { 0 }
+    if drop_handle(db_handle) {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]

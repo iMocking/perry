@@ -9,8 +9,9 @@
 //! returns a 32-byte Buffer).
 
 use perry_ffi::{
-    alloc_bigint_from_str, alloc_buffer, alloc_string, build_object_shape, js_object_alloc_with_shape,
-    js_object_set_field, BigIntHeader, BufferHeader, JsValue, StringHeader, BIGINT_LIMBS,
+    alloc_bigint_from_str, alloc_buffer, alloc_string, build_object_shape,
+    js_object_alloc_with_shape, js_object_set_field, BigIntHeader, BufferHeader, JsValue,
+    StringHeader, BIGINT_LIMBS,
 };
 
 /// `getAddress(address: string) -> string` — EIP-55 checksummed.
@@ -62,9 +63,8 @@ pub extern "C" fn js_ethers_wallet_create_random() -> JsValue {
     let addr_checksummed = to_checksum_address(&addr_lower);
 
     let (packed, shape_id) = build_object_shape(&["address", "privateKey"]);
-    let obj = unsafe {
-        js_object_alloc_with_shape(shape_id, 2, packed.as_ptr(), packed.len() as u32)
-    };
+    let obj =
+        unsafe { js_object_alloc_with_shape(shape_id, 2, packed.as_ptr(), packed.len() as u32) };
     let addr_str = alloc_string(&addr_checksummed);
     unsafe { js_object_set_field(obj, 0, JsValue::from_string_ptr(addr_str.as_raw())) };
     let pk_jsstr = alloc_string(pk_str);
@@ -436,7 +436,10 @@ mod tests {
 
     #[test]
     fn format_with_decimals_basic() {
-        assert_eq!(format_with_decimals("1500000000000000000", 18), "1.500000000000000000");
+        assert_eq!(
+            format_with_decimals("1500000000000000000", 18),
+            "1.500000000000000000"
+        );
         assert_eq!(format_with_decimals("1", 18), "0.000000000000000001");
         assert_eq!(format_with_decimals("0", 18), "0.000000000000000000");
     }

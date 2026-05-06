@@ -52,12 +52,12 @@ pub struct NativeMethodRef {
 /// the manifest is in sync with the dispatch table. Stable iteration
 /// order — declaration order in `lower_call.rs::NATIVE_MODULE_TABLE`.
 pub fn iter_native_method_signatures() -> impl Iterator<Item = NativeMethodRef> {
-    lower_call::iter_native_module_table().map(
-        |(module, has_receiver, method, class_filter)| NativeMethodRef {
+    lower_call::iter_native_module_table().map(|(module, has_receiver, method, class_filter)| {
+        NativeMethodRef {
             module,
             has_receiver,
             method,
             class_filter,
-        },
-    )
+        }
+    })
 }

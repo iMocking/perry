@@ -548,7 +548,8 @@ pub extern "C" fn js_set_from_iterable(value: f64) -> *mut SetHeader {
         }
         unsafe {
             let byte_len = (*str_ptr).byte_len as usize;
-            let data = (str_ptr as *const u8).add(std::mem::size_of::<crate::string::StringHeader>());
+            let data =
+                (str_ptr as *const u8).add(std::mem::size_of::<crate::string::StringHeader>());
             let bytes = std::slice::from_raw_parts(data, byte_len);
             // UTF-8 codepoint iteration. Each codepoint becomes a single-
             // codepoint string allocated via `js_string_from_bytes`, then
@@ -571,8 +572,10 @@ pub extern "C" fn js_set_from_iterable(value: f64) -> *mut SetHeader {
                 };
                 let end = (i + codepoint_len).min(bytes.len());
                 let cp_bytes = &bytes[i..end];
-                let cp_str = crate::string::js_string_from_bytes(cp_bytes.as_ptr(), cp_bytes.len() as u32);
-                let cp_value = f64::from_bits(0x7FFF_0000_0000_0000 | (cp_str as u64 & 0x0000_FFFF_FFFF_FFFF));
+                let cp_str =
+                    crate::string::js_string_from_bytes(cp_bytes.as_ptr(), cp_bytes.len() as u32);
+                let cp_value =
+                    f64::from_bits(0x7FFF_0000_0000_0000 | (cp_str as u64 & 0x0000_FFFF_FFFF_FFFF));
                 js_set_add(set, cp_value);
                 i = end;
             }

@@ -143,9 +143,8 @@ unsafe fn parse_mail_options(options: JsValue) -> Option<MailOptions> {
 
 fn build_info_object(message_id: &str, response: &str) -> JsValue {
     let (packed, shape_id) = build_object_shape(&["messageId", "response"]);
-    let obj = unsafe {
-        js_object_alloc_with_shape(shape_id, 2, packed.as_ptr(), packed.len() as u32)
-    };
+    let obj =
+        unsafe { js_object_alloc_with_shape(shape_id, 2, packed.as_ptr(), packed.len() as u32) };
     let id_str = alloc_string(message_id);
     unsafe { js_object_set_field(obj, 0, JsValue::from_string_ptr(id_str.as_raw())) };
     let resp_str = alloc_string(response);
@@ -230,8 +229,8 @@ pub unsafe extern "C" fn js_nodemailer_send_mail(
                     .map_err(|e| format!("Failed to build email: {}", e))?
             };
 
-            let send_result = tokio::runtime::Handle::current()
-                .block_on(async move { mailer.send(email).await });
+            let send_result =
+                tokio::runtime::Handle::current().block_on(async move { mailer.send(email).await });
 
             match send_result {
                 Ok(response) => {
@@ -331,9 +330,8 @@ mod tests {
         // — `js_nodemailer_create_transport` always returns a non-zero
         // handle so the user can still queue mails (which will error
         // at SMTP-connect time).
-        let h_f = unsafe {
-            js_nodemailer_create_transport(f64::from_bits(JsValue::UNDEFINED.bits()))
-        };
+        let h_f =
+            unsafe { js_nodemailer_create_transport(f64::from_bits(JsValue::UNDEFINED.bits())) };
         assert_ne!(h_f, 0.0);
         let stored = get_handle::<SmtpTransportHandle>(h_f as i64).expect("registered");
         assert_eq!(stored.config.host, "localhost");

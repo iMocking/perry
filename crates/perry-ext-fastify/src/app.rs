@@ -223,12 +223,7 @@ pub unsafe extern "C" fn js_fastify_create_with_opts(opts_f64: f64) -> Handle {
 // ============================================================================
 
 /// Internal helper — append a route to the app.
-unsafe fn register_route(
-    app_handle: Handle,
-    method: &str,
-    path: i64,
-    handler: i64,
-) -> bool {
+unsafe fn register_route(app_handle: Handle, method: &str, path: i64, handler: i64) -> bool {
     let path_str = match string_from_nanboxed(path) {
         Some(p) => p,
         None => return false,
@@ -320,11 +315,7 @@ pub unsafe extern "C" fn js_fastify_route(
 
 /// `app.addHook(event, handler)` — registers a lifecycle hook.
 #[no_mangle]
-pub unsafe extern "C" fn js_fastify_add_hook(
-    app: Handle,
-    hook_name: i64,
-    handler: i64,
-) -> bool {
+pub unsafe extern "C" fn js_fastify_add_hook(app: Handle, hook_name: i64, handler: i64) -> bool {
     let name = match string_from_nanboxed(hook_name) {
         Some(n) => n,
         None => return false,
@@ -384,8 +375,7 @@ pub unsafe extern "C" fn js_fastify_register(app_handle: Handle, plugin: i64, op
     // NaN-box the parent app handle so the plugin's method dispatch
     // (e.g. `app.get(...)`) sees a POINTER_TAG'd JS handle the
     // codegen-side dispatcher knows how to unbox.
-    let nanboxed_app =
-        f64::from_bits(POINTER_TAG | (app_handle as u64 & PTR_MASK));
+    let nanboxed_app = f64::from_bits(POINTER_TAG | (app_handle as u64 & PTR_MASK));
 
     // Strip a NaN-box wrapper if codegen handed us one.
     let raw_closure = if (plugin as u64 & 0xFFFF_0000_0000_0000) == POINTER_TAG {

@@ -44,20 +44,14 @@ pub extern "C" fn perry_ffi_promise_new() -> *mut perry_runtime::Promise {
 /// the encoding so external authors don't write the tag values
 /// directly.
 #[no_mangle]
-pub extern "C" fn perry_ffi_promise_resolve_bits(
-    promise: *mut perry_runtime::Promise,
-    bits: u64,
-) {
+pub extern "C" fn perry_ffi_promise_resolve_bits(promise: *mut perry_runtime::Promise, bits: u64) {
     async_bridge::queue_promise_resolution(promise as usize, true, bits);
 }
 
 /// `perry_ffi_promise_reject_bits(promise, bits)` — reject with a
 /// JSValue. Same encoding contract as resolve.
 #[no_mangle]
-pub extern "C" fn perry_ffi_promise_reject_bits(
-    promise: *mut perry_runtime::Promise,
-    bits: u64,
-) {
+pub extern "C" fn perry_ffi_promise_reject_bits(promise: *mut perry_runtime::Promise, bits: u64) {
     async_bridge::queue_promise_resolution(promise as usize, false, bits);
 }
 
@@ -77,10 +71,7 @@ pub extern "C" fn perry_ffi_promise_reject_bits(
 /// (the closure can run an `async {}` block via
 /// `tokio::runtime::Handle::current().block_on`).
 #[no_mangle]
-pub extern "C" fn perry_ffi_spawn_blocking(
-    ctx: *mut c_void,
-    invoke: extern "C" fn(*mut c_void),
-) {
+pub extern "C" fn perry_ffi_spawn_blocking(ctx: *mut c_void, invoke: extern "C" fn(*mut c_void)) {
     // v0.5.579: ensure perry-stdlib's pump is registered with the
     // runtime so events queued by external wrappers (perry-ext-*)
     // get drained on the main thread. Without this, the runtime's
@@ -157,10 +148,7 @@ pub extern "C" fn perry_ffi_spawn_blocking_with_reactor(
 ///
 /// `invoke` must take ownership of `ctx`.
 #[no_mangle]
-pub extern "C" fn perry_ffi_spawn_async(
-    ctx: *mut c_void,
-    invoke: extern "C" fn(*mut c_void),
-) {
+pub extern "C" fn perry_ffi_spawn_async(ctx: *mut c_void, invoke: extern "C" fn(*mut c_void)) {
     let ctx_addr = ctx as usize;
     async_bridge::runtime().spawn(async move {
         // The user-supplied trampoline receives the raw `ctx`,

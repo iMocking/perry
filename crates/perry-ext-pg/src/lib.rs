@@ -14,10 +14,10 @@
 //! demands it.
 
 use perry_ffi::{
-    alloc_string, build_object_shape, get_handle_mut, js_array_alloc, js_array_get,
-    js_array_push, js_object_alloc_with_shape, js_object_get_field, js_object_set_field,
-    register_handle, spawn_blocking, take_handle, ArrayHeader, Handle, JsPromise, JsValue,
-    ObjectHeader, Promise, StringHeader,
+    alloc_string, build_object_shape, get_handle_mut, js_array_alloc, js_array_get, js_array_push,
+    js_object_alloc_with_shape, js_object_get_field, js_object_set_field, register_handle,
+    spawn_blocking, take_handle, ArrayHeader, Handle, JsPromise, JsValue, ObjectHeader, Promise,
+    StringHeader,
 };
 use sqlx::postgres::{PgColumn, PgConnection, PgPool, PgPoolOptions, PgRow};
 use sqlx::{Column, Connection, Row, TypeInfo};
@@ -148,7 +148,12 @@ fn row_to_js_object(row: &PgRow) -> *mut ObjectHeader {
     let cols: Vec<&str> = row.columns().iter().map(|c| c.name()).collect();
     let (packed, shape_id) = build_object_shape(&cols);
     let obj = unsafe {
-        js_object_alloc_with_shape(shape_id, cols.len() as u32, packed.as_ptr(), packed.len() as u32)
+        js_object_alloc_with_shape(
+            shape_id,
+            cols.len() as u32,
+            packed.as_ptr(),
+            packed.len() as u32,
+        )
     };
     for i in 0..cols.len() {
         let val = column_value_to_jsvalue(row, i);
@@ -160,9 +165,8 @@ fn row_to_js_object(row: &PgRow) -> *mut ObjectHeader {
 /// Build a `FieldDef`-shaped object: `{ name, dataTypeID, tableID }`.
 fn column_to_field_def(col: &PgColumn) -> *mut ObjectHeader {
     let (packed, shape_id) = build_object_shape(&["name", "dataTypeID", "tableID"]);
-    let obj = unsafe {
-        js_object_alloc_with_shape(shape_id, 3, packed.as_ptr(), packed.len() as u32)
-    };
+    let obj =
+        unsafe { js_object_alloc_with_shape(shape_id, 3, packed.as_ptr(), packed.len() as u32) };
     let name_str = alloc_string(col.name());
     let type_str = alloc_string(col.type_info().name());
     unsafe {
@@ -176,11 +180,9 @@ fn column_to_field_def(col: &PgColumn) -> *mut ObjectHeader {
 /// Wrap a query outcome in pg's `{ rows, fields, rowCount, command }`
 /// result object.
 fn rows_to_pg_result(rows: Vec<PgRow>, columns: &[PgColumn], command: &str) -> JsValue {
-    let (packed, shape_id) =
-        build_object_shape(&["rows", "fields", "rowCount", "command"]);
-    let result_obj = unsafe {
-        js_object_alloc_with_shape(shape_id, 4, packed.as_ptr(), packed.len() as u32)
-    };
+    let (packed, shape_id) = build_object_shape(&["rows", "fields", "rowCount", "command"]);
+    let result_obj =
+        unsafe { js_object_alloc_with_shape(shape_id, 4, packed.as_ptr(), packed.len() as u32) };
 
     // rows array
     let mut rows_arr = unsafe { js_array_alloc(rows.len() as u32) };
@@ -194,8 +196,7 @@ fn rows_to_pg_result(rows: Vec<PgRow>, columns: &[PgColumn], command: &str) -> J
     let mut fields_arr = unsafe { js_array_alloc(columns.len() as u32) };
     for col in columns {
         let field_obj = column_to_field_def(col);
-        fields_arr =
-            unsafe { js_array_push(fields_arr, JsValue::from_object_ptr(field_obj)) };
+        fields_arr = unsafe { js_array_push(fields_arr, JsValue::from_object_ptr(field_obj)) };
     }
     unsafe { js_object_set_field(result_obj, 1, JsValue::from_object_ptr(fields_arr)) };
 
@@ -282,9 +283,7 @@ unsafe fn read_sql(sql_ptr: *const u8) -> String {
     let len = (*header).byte_len as usize;
     let data = sql_ptr.add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data, len);
-    std::str::from_utf8(bytes)
-        .unwrap_or("")
-        .to_string()
+    std::str::from_utf8(bytes).unwrap_or("").to_string()
 }
 
 // ── Connection (Client) ───────────────────────────────────────────
@@ -334,8 +333,8 @@ pub extern "C" fn js_pg_client_connect(client_handle: Handle) -> *mut Promise {
 
     // Snapshot the pending config before entering spawn_blocking —
     // can't hold a `&mut` across the boundary.
-    let pending = get_handle_mut::<PgConnectionHandle>(client_handle)
-        .and_then(|h| h.pending_config.take());
+    let pending =
+        get_handle_mut::<PgConnectionHandle>(client_handle).and_then(|h| h.pending_config.take());
 
     let Some(pg_config) = pending else {
         promise.resolve_undefined();
@@ -598,12 +597,8 @@ pub unsafe extern "C" fn js_pg_create_pool(config_f: f64) -> *mut Promise {
 
     spawn_blocking(move || {
         let url = pg_config.to_url();
-        let result = tokio::runtime::Handle::current().block_on(async move {
-            PgPoolOptions::new()
-                .max_connections(10)
-                .connect(&url)
-                .await
-        });
+        let result = tokio::runtime::Handle::current()
+            .block_on(async move { PgPoolOptions::new().max_connections(10).connect(&url).await });
         match result {
             Ok(pool) => {
                 let handle = register_handle(PgPoolHandle::new(pool));
@@ -620,10 +615,7 @@ pub unsafe extern "C" fn js_pg_create_pool(config_f: f64) -> *mut Promise {
 /// # Safety
 /// `sql_ptr` must be null or a Perry-runtime `StringHeader`.
 #[no_mangle]
-pub unsafe extern "C" fn js_pg_pool_query(
-    pool_handle: Handle,
-    sql_ptr: *const u8,
-) -> *mut Promise {
+pub unsafe extern "C" fn js_pg_pool_query(pool_handle: Handle, sql_ptr: *const u8) -> *mut Promise {
     let sql = read_sql(sql_ptr);
     let command = sql
         .split_whitespace()
@@ -721,13 +713,9 @@ mod tests {
     #[test]
     fn client_new_returns_handle() {
         let cfg_obj = unsafe {
-            let (packed, shape_id) = build_object_shape(&["host", "port", "user", "password", "database"]);
-            let obj = js_object_alloc_with_shape(
-                shape_id,
-                5,
-                packed.as_ptr(),
-                packed.len() as u32,
-            );
+            let (packed, shape_id) =
+                build_object_shape(&["host", "port", "user", "password", "database"]);
+            let obj = js_object_alloc_with_shape(shape_id, 5, packed.as_ptr(), packed.len() as u32);
             let host_str = alloc_string("localhost");
             js_object_set_field(obj, 0, JsValue::from_string_ptr(host_str.as_raw()));
             js_object_set_field(obj, 1, JsValue::from_number(5432.0));

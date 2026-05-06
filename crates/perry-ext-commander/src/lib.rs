@@ -82,9 +82,8 @@ fn ensure_gc_scanner_registered() {
 fn scan_commander_roots(mark: &mut dyn FnMut(f64)) {
     iter_handles_of::<CommanderHandle, _>(|cmd| {
         if cmd.action_callback != 0 {
-            let boxed = f64::from_bits(
-                POINTER_TAG | (cmd.action_callback as u64 & 0x0000_FFFF_FFFF_FFFF),
-            );
+            let boxed =
+                f64::from_bits(POINTER_TAG | (cmd.action_callback as u64 & 0x0000_FFFF_FFFF_FFFF));
             mark(boxed);
         }
     });
@@ -128,7 +127,10 @@ pub extern "C" fn js_commander_new() -> Handle {
 /// # Safety
 /// `name_ptr` must be null or a Perry-runtime `StringHeader`.
 #[no_mangle]
-pub unsafe extern "C" fn js_commander_name(handle: Handle, name_ptr: *const StringHeader) -> Handle {
+pub unsafe extern "C" fn js_commander_name(
+    handle: Handle,
+    name_ptr: *const StringHeader,
+) -> Handle {
     if let Some(name) = read_str(name_ptr) {
         with_handle_mut::<CommanderHandle, _, _>(handle, |cmd| cmd.name = name);
     }

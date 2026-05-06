@@ -760,19 +760,13 @@ pub unsafe extern "C" fn js_reader_read(reader_handle: f64) -> *mut Promise {
         Some(_) => {
             let s = alloc_string("Reader is no longer locked to a stream");
             let err = js_error_new_with_message(s.as_raw());
-            promise_reject_bits(
-                promise,
-                JsValue::from_object_ptr(err as *mut u8).bits(),
-            );
+            promise_reject_bits(promise, JsValue::from_object_ptr(err as *mut u8).bits());
             return promise;
         }
         None => {
             let s = alloc_string("Invalid reader");
             let err = js_error_new_with_message(s.as_raw());
-            promise_reject_bits(
-                promise,
-                JsValue::from_object_ptr(err as *mut u8).bits(),
-            );
+            promise_reject_bits(promise, JsValue::from_object_ptr(err as *mut u8).bits());
             return promise;
         }
     };
@@ -1097,10 +1091,7 @@ pub unsafe extern "C" fn js_writable_stream_close(stream_handle: f64) -> *mut Pr
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_writable_stream_abort(
-    stream_handle: f64,
-    reason: f64,
-) -> *mut Promise {
+pub unsafe extern "C" fn js_writable_stream_abort(stream_handle: f64, reason: f64) -> *mut Promise {
     let promise = promise_new();
     let id = stream_handle as usize;
     let reason_bits = reason.to_bits();
@@ -1139,10 +1130,7 @@ pub unsafe extern "C" fn js_writer_write(writer_handle: f64, chunk: f64) -> *mut
         _ => {
             let s = alloc_string("Writer is no longer locked to a stream");
             let err = js_error_new_with_message(s.as_raw());
-            promise_reject_bits(
-                promise,
-                JsValue::from_object_ptr(err as *mut u8).bits(),
-            );
+            promise_reject_bits(promise, JsValue::from_object_ptr(err as *mut u8).bits());
             return promise;
         }
     };
@@ -1159,10 +1147,7 @@ pub unsafe extern "C" fn js_writer_write(writer_handle: f64, chunk: f64) -> *mut
         _ => {
             let s = alloc_string("Stream is closed or closing");
             let err = js_error_new_with_message(s.as_raw());
-            promise_reject_bits(
-                promise,
-                JsValue::from_object_ptr(err as *mut u8).bits(),
-            );
+            promise_reject_bits(promise, JsValue::from_object_ptr(err as *mut u8).bits());
             return promise;
         }
     };
@@ -1423,9 +1408,7 @@ pub unsafe extern "C" fn js_streams_throw_byob_not_implemented() -> f64 {
 
 #[no_mangle]
 pub unsafe extern "C" fn js_streams_throw_byte_length_not_implemented() -> f64 {
-    throw_with_message(
-        "ByteLengthQueuingStrategy is not yet implemented (issue #237 followup)",
-    );
+    throw_with_message("ByteLengthQueuingStrategy is not yet implemented (issue #237 followup)");
 }
 
 // ─────────────────────────────────────────────────────────────────────

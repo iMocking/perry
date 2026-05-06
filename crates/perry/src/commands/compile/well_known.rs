@@ -71,7 +71,10 @@ pub fn iter_well_known() -> impl Iterator<Item = &'static WellKnownBinding> {
 /// workspace root (from `find_perry_workspace_root`). Returns
 /// `None` when the file isn't present — caller decides whether
 /// to error or fall through.
-pub fn bundled_staticlib_path(workspace_root: &Path, binding: &WellKnownBinding) -> Option<PathBuf> {
+pub fn bundled_staticlib_path(
+    workspace_root: &Path,
+    binding: &WellKnownBinding,
+) -> Option<PathBuf> {
     let path = workspace_root
         .join("target")
         .join("release")

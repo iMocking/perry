@@ -30,7 +30,12 @@ pub fn emit_markdown(perry_version: &str) -> String {
     let _ = writeln!(out);
     let _ = writeln!(out, "**Generated for Perry v{}.**", perry_version);
     let _ = writeln!(out);
-    let _ = writeln!(out, "Total: {} entries across {} modules.", API_MANIFEST.len(), by_module.len());
+    let _ = writeln!(
+        out,
+        "Total: {} entries across {} modules.",
+        API_MANIFEST.len(),
+        by_module.len()
+    );
     let _ = writeln!(out);
     let _ = writeln!(out, "## Modules");
     let _ = writeln!(out);
@@ -120,10 +125,18 @@ pub fn emit_dts(perry_version: &str) -> String {
     let mut out = String::new();
     let by_module = group_by_module();
 
-    let _ = writeln!(out, "// Auto-generated from Perry's API manifest (#465). Do not edit by hand.");
+    let _ = writeln!(
+        out,
+        "// Auto-generated from Perry's API manifest (#465). Do not edit by hand."
+    );
     let _ = writeln!(out, "// Source: perry-api-manifest::API_MANIFEST");
     let _ = writeln!(out, "// Perry version: {}", perry_version);
-    let _ = writeln!(out, "// Coverage: {} entries across {} modules", API_MANIFEST.len(), by_module.len());
+    let _ = writeln!(
+        out,
+        "// Coverage: {} entries across {} modules",
+        API_MANIFEST.len(),
+        by_module.len()
+    );
     let _ = writeln!(out);
 
     for (module, entries) in &by_module {
@@ -132,7 +145,16 @@ pub fn emit_dts(perry_version: &str) -> String {
 
         // Classes first — methods may reference them via class_filter.
         for e in entries.iter().filter(|e| matches!(e.kind, ApiKind::Class)) {
-            let _ = writeln!(out, "  /** {}{} */", source_dts_tag(e), if e.stub { " — stub (no-op at runtime)" } else { "" });
+            let _ = writeln!(
+                out,
+                "  /** {}{} */",
+                source_dts_tag(e),
+                if e.stub {
+                    " — stub (no-op at runtime)"
+                } else {
+                    ""
+                }
+            );
             let _ = writeln!(
                 out,
                 "  export class {} {{ [key: string]: any; }}",
@@ -141,8 +163,16 @@ pub fn emit_dts(perry_version: &str) -> String {
         }
 
         // Properties.
-        for e in entries.iter().filter(|e| matches!(e.kind, ApiKind::Property)) {
-            let _ = writeln!(out, "  /** {}{} */", source_dts_tag(e), if e.stub { " — stub" } else { "" });
+        for e in entries
+            .iter()
+            .filter(|e| matches!(e.kind, ApiKind::Property))
+        {
+            let _ = writeln!(
+                out,
+                "  /** {}{} */",
+                source_dts_tag(e),
+                if e.stub { " — stub" } else { "" }
+            );
             let _ = writeln!(out, "  export const {}: any;", ts_ident(e.name));
         }
 
@@ -271,9 +301,20 @@ fn module_declaration_name(s: &str) -> &str {
 fn ts_ident(s: &str) -> String {
     let mut out: String = s
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '$' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '$' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
-    if out.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+    if out
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
+    {
         out.insert(0, '_');
     }
     out

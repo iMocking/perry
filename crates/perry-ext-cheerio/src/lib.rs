@@ -317,9 +317,7 @@ pub unsafe extern "C" fn js_cheerio_selection_is(
 }
 
 #[no_mangle]
-pub extern "C" fn js_cheerio_selection_to_array(
-    selection_handle: Handle,
-) -> *mut ArrayHeader {
+pub extern "C" fn js_cheerio_selection_to_array(selection_handle: Handle) -> *mut ArrayHeader {
     let mut result = unsafe { js_array_alloc(0) };
     if let Some(selection) = get_handle::<CheerioSelectionHandle>(selection_handle) {
         let document = Html::parse_document(&selection.html);
@@ -327,8 +325,7 @@ pub extern "C" fn js_cheerio_selection_to_array(
             for element in document.select(&selector) {
                 let html_str = element.html();
                 let s = alloc_string(&html_str);
-                result =
-                    unsafe { js_array_push(result, JsValue::from_string_ptr(s.as_raw())) };
+                result = unsafe { js_array_push(result, JsValue::from_string_ptr(s.as_raw())) };
             }
         }
     }
@@ -336,9 +333,7 @@ pub extern "C" fn js_cheerio_selection_to_array(
 }
 
 #[no_mangle]
-pub extern "C" fn js_cheerio_selection_texts(
-    selection_handle: Handle,
-) -> *mut ArrayHeader {
+pub extern "C" fn js_cheerio_selection_texts(selection_handle: Handle) -> *mut ArrayHeader {
     let mut result = unsafe { js_array_alloc(0) };
     if let Some(selection) = get_handle::<CheerioSelectionHandle>(selection_handle) {
         let document = Html::parse_document(&selection.html);
@@ -346,8 +341,7 @@ pub extern "C" fn js_cheerio_selection_texts(
             for element in document.select(&selector) {
                 let text: String = element.text().collect();
                 let s = alloc_string(&text);
-                result =
-                    unsafe { js_array_push(result, JsValue::from_string_ptr(s.as_raw())) };
+                result = unsafe { js_array_push(result, JsValue::from_string_ptr(s.as_raw())) };
             }
         }
     }

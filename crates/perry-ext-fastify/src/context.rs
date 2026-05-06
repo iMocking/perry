@@ -227,10 +227,7 @@ pub unsafe extern "C" fn js_fastify_req_params_object(ctx_handle: Handle) -> f64
 
 /// `c.req.param('id')` — single param accessor.
 #[no_mangle]
-pub unsafe extern "C" fn js_fastify_req_param(
-    ctx_handle: Handle,
-    name: i64,
-) -> *mut StringHeader {
+pub unsafe extern "C" fn js_fastify_req_param(ctx_handle: Handle, name: i64) -> *mut StringHeader {
     let name = match string_from_nanboxed(name) {
         Some(n) => n,
         None => return std::ptr::null_mut(),
@@ -308,10 +305,7 @@ pub unsafe extern "C" fn js_fastify_req_headers(ctx_handle: Handle) -> i64 {
 
 /// `request.headers['x-foo']` — single header lookup.
 #[no_mangle]
-pub unsafe extern "C" fn js_fastify_req_header(
-    ctx_handle: Handle,
-    name: i64,
-) -> *mut StringHeader {
+pub unsafe extern "C" fn js_fastify_req_header(ctx_handle: Handle, name: i64) -> *mut StringHeader {
     let name = match string_from_nanboxed(name) {
         Some(n) => n.to_lowercase(),
         None => return std::ptr::null_mut(),
@@ -451,11 +445,7 @@ pub unsafe extern "C" fn js_fastify_ctx_html(ctx_handle: Handle, html: i64, stat
 
 /// `c.redirect(url, status?)`.
 #[no_mangle]
-pub unsafe extern "C" fn js_fastify_ctx_redirect(
-    ctx_handle: Handle,
-    url: i64,
-    status: f64,
-) -> f64 {
+pub unsafe extern "C" fn js_fastify_ctx_redirect(ctx_handle: Handle, url: i64, status: f64) -> f64 {
     let url = string_from_nanboxed(url).unwrap_or_default();
     if let Some(ctx) = get_handle_mut::<FastifyContext>(ctx_handle) {
         ctx.status_code = if status > 0.0 { status as u16 } else { 302 };
@@ -526,12 +516,8 @@ unsafe fn build_string_map_object(map: &HashMap<String, String>) -> Option<f64> 
     let keys: Vec<&str> = map.keys().map(|s| s.as_str()).collect();
     let (packed, shape_id) = build_object_shape(&keys);
     let count = keys.len() as u32;
-    let obj: *mut ObjectHeader = js_object_alloc_with_shape(
-        shape_id,
-        count,
-        packed.as_ptr(),
-        packed.len() as u32,
-    );
+    let obj: *mut ObjectHeader =
+        js_object_alloc_with_shape(shape_id, count, packed.as_ptr(), packed.len() as u32);
     if obj.is_null() {
         return None;
     }

@@ -424,8 +424,7 @@ pub extern "C" fn js_datefns_add_days(timestamp: f64, amount: f64) -> f64 {
         return f64::NAN;
     }
     let unit = alloc_string("day");
-    let new_handle_f64 =
-        unsafe { js_dayjs_add(f64_to_handle(handle_f64), amount, unit.as_raw()) };
+    let new_handle_f64 = unsafe { js_dayjs_add(f64_to_handle(handle_f64), amount, unit.as_raw()) };
     if new_handle_f64 == 0.0 {
         return f64::NAN;
     }
@@ -439,8 +438,7 @@ pub extern "C" fn js_datefns_add_months(timestamp: f64, amount: f64) -> f64 {
         return f64::NAN;
     }
     let unit = alloc_string("month");
-    let new_handle_f64 =
-        unsafe { js_dayjs_add(f64_to_handle(handle_f64), amount, unit.as_raw()) };
+    let new_handle_f64 = unsafe { js_dayjs_add(f64_to_handle(handle_f64), amount, unit.as_raw()) };
     if new_handle_f64 == 0.0 {
         return f64::NAN;
     }
@@ -454,8 +452,7 @@ pub extern "C" fn js_datefns_add_years(timestamp: f64, amount: f64) -> f64 {
         return f64::NAN;
     }
     let unit = alloc_string("year");
-    let new_handle_f64 =
-        unsafe { js_dayjs_add(f64_to_handle(handle_f64), amount, unit.as_raw()) };
+    let new_handle_f64 = unsafe { js_dayjs_add(f64_to_handle(handle_f64), amount, unit.as_raw()) };
     if new_handle_f64 == 0.0 {
         return f64::NAN;
     }
@@ -508,8 +505,7 @@ pub extern "C" fn js_datefns_start_of_day(timestamp: f64) -> f64 {
         return f64::NAN;
     }
     let unit = alloc_string("day");
-    let new_handle_f64 =
-        unsafe { js_dayjs_start_of(f64_to_handle(handle_f64), unit.as_raw()) };
+    let new_handle_f64 = unsafe { js_dayjs_start_of(f64_to_handle(handle_f64), unit.as_raw()) };
     if new_handle_f64 == 0.0 {
         return f64::NAN;
     }

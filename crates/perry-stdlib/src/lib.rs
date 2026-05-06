@@ -157,12 +157,18 @@ pub use ws::*;
 
 // === Raw TCP sockets (net.Socket) + TLS (tls.connect, socket.upgradeToTLS) ===
 // Desktop only; iOS/Android stdlib are stubs for now.
-#[cfg(all(feature = "bundled-net", not(target_os = "ios"), not(target_os = "android")))]
+#[cfg(all(
+    feature = "bundled-net",
+    not(target_os = "ios"),
+    not(target_os = "android")
+))]
 pub mod net;
-#[cfg(all(feature = "bundled-net", not(target_os = "ios"), not(target_os = "android")))]
+#[cfg(all(
+    feature = "bundled-net",
+    not(target_os = "ios"),
+    not(target_os = "android")
+))]
 pub use net::*;
-
-
 
 // === Databases ===
 // pg lives behind `bundled-pg` (v0.5.566); mysql2 lives behind

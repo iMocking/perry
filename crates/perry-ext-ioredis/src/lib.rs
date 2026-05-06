@@ -425,8 +425,8 @@ pub unsafe extern "C" fn js_ioredis_hgetall(
     let promise = JsPromise::new();
     let raw = promise.as_raw();
     spawn_blocking(move || {
-        let outcome: Result<HashMap<String, String>, String> =
-            tokio::runtime::Handle::current().block_on(async move {
+        let outcome: Result<HashMap<String, String>, String> = tokio::runtime::Handle::current()
+            .block_on(async move {
                 let mut conn = get_connection(handle).await?;
                 tokio::time::timeout(
                     Duration::from_secs(DEFAULT_TIMEOUT_SECS),
@@ -484,9 +484,8 @@ pub extern "C" fn js_ioredis_quit(handle: Handle) -> *mut Promise {
         let outcome: Result<(), String> = tokio::runtime::Handle::current().block_on(async move {
             let conn_opt = CONNECTIONS.lock().unwrap().remove(&handle);
             if let Some(mut conn) = conn_opt {
-                let _: redis::RedisResult<()> = redis::cmd("QUIT")
-                    .query_async::<()>(&mut conn)
-                    .await;
+                let _: redis::RedisResult<()> =
+                    redis::cmd("QUIT").query_async::<()>(&mut conn).await;
             }
             URLS.lock().unwrap().remove(&handle);
             // Take the handle out of the registry so the wrapper struct drops.

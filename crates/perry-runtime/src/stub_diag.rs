@@ -133,4 +133,3 @@ mod tests {
         perry_stub_warn("test_smoke_symbol", "smoke test reason", Some("#464"));
     }
 }
-

@@ -241,10 +241,7 @@ pub unsafe extern "C" fn js_ratelimit_reward(
 /// # Safety
 /// `key_ptr` must be null or a Perry-runtime `StringHeader`.
 #[no_mangle]
-pub unsafe extern "C" fn js_ratelimit_check(
-    handle: Handle,
-    key_ptr: *const StringHeader,
-) -> bool {
+pub unsafe extern "C" fn js_ratelimit_check(handle: Handle, key_ptr: *const StringHeader) -> bool {
     let key = read_str(key_ptr).unwrap_or_else(|| "default".to_string());
     if let Some(keyed) = get_handle::<KeyedRateLimiterHandle>(handle) {
         let limiters = keyed.limiters.lock().unwrap();

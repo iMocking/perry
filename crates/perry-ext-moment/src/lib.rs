@@ -112,8 +112,7 @@ pub unsafe extern "C" fn js_moment_format(
     format_ptr: *const StringHeader,
 ) -> *mut StringHeader {
     let handle = f64_to_handle(handle);
-    let format_str =
-        read_str(format_ptr).unwrap_or_else(|| "YYYY-MM-DDTHH:mm:ssZ".to_string());
+    let format_str = read_str(format_ptr).unwrap_or_else(|| "YYYY-MM-DDTHH:mm:ssZ".to_string());
 
     if let Some(moment) = get_handle::<MomentHandle>(handle) {
         let chrono_format = format_str
@@ -457,11 +456,7 @@ pub unsafe extern "C" fn js_moment_is_same(
 }
 
 #[no_mangle]
-pub extern "C" fn js_moment_is_between(
-    handle: f64,
-    start_handle: f64,
-    end_handle: f64,
-) -> f64 {
+pub extern "C" fn js_moment_is_between(handle: f64, start_handle: f64, end_handle: f64) -> f64 {
     let handle = f64_to_handle(handle);
     let start_handle = f64_to_handle(start_handle);
     let end_handle = f64_to_handle(end_handle);

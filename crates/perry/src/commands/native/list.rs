@@ -9,8 +9,7 @@ use crate::OutputFormat;
 pub struct ListArgs {}
 
 pub fn run(_args: ListArgs, format: OutputFormat, _use_color: bool) -> Result<()> {
-    let entries: Vec<_> =
-        crate::commands::compile::well_known::iter_well_known().collect();
+    let entries: Vec<_> = crate::commands::compile::well_known::iter_well_known().collect();
 
     match format {
         OutputFormat::Json => {
@@ -28,22 +27,14 @@ pub fn run(_args: ListArgs, format: OutputFormat, _use_color: bool) -> Result<()
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
         _ => {
-            println!(
-                "{} bindings ship with this Perry build:",
-                entries.len()
-            );
+            println!("{} bindings ship with this Perry build:", entries.len());
             println!();
             for b in &entries {
                 let tracking = b.tracking.as_deref().unwrap_or("-");
-                println!(
-                    "  {:<28}  → {:<32}  ({})",
-                    b.package, b.krate, tracking
-                );
+                println!("  {:<28}  → {:<32}  ({})", b.package, b.krate, tracking);
             }
             println!();
-            println!(
-                "Resolution order (see docs/src/native-libraries/manifest-v1.md):"
-            );
+            println!("Resolution order (see docs/src/native-libraries/manifest-v1.md):");
             println!("  1. node_modules/<name>/ with perry.nativeLibrary  → use it");
             println!("  2. node_modules/<name>/ without manifest          → V8 fallback");
             println!("  3. well-known table (above)                       → bundled crate");

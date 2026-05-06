@@ -128,7 +128,11 @@ pub unsafe extern "C" fn js_handle_method_dispatch(
     // net.Socket: covers wrapper-function, struct-field, and Map.get
     // receivers where codegen lost the static type. Static NATIVE_MODULE_TABLE
     // path is still preferred when types are visible.
-    #[cfg(all(feature = "bundled-net", not(target_os = "ios"), not(target_os = "android")))]
+    #[cfg(all(
+        feature = "bundled-net",
+        not(target_os = "ios"),
+        not(target_os = "android")
+    ))]
     if crate::net::is_net_socket_handle(handle) {
         return dispatch_net_socket(handle, method_name, args);
     }
@@ -379,7 +383,11 @@ unsafe fn dispatch_fastify_context(handle: i64, method: &str, args: &[f64]) -> f
 /// pointers in the low 48 bits with POINTER_TAG / STRING_TAG in the top.
 /// We strip the tag and pass the raw `i64` to the FFI — same shape the
 /// codegen path produces.
-#[cfg(all(feature = "bundled-net", not(target_os = "ios"), not(target_os = "android")))]
+#[cfg(all(
+    feature = "bundled-net",
+    not(target_os = "ios"),
+    not(target_os = "android")
+))]
 unsafe fn dispatch_net_socket(handle: i64, method: &str, args: &[f64]) -> f64 {
     /// Strip a NaN-box tag (POINTER / STRING / BIGINT) to get the raw 48-bit pointer.
     fn unbox_to_i64(v: f64) -> i64 {

@@ -45,12 +45,7 @@ extern "C" {
     fn js_closure_call0(closure: *const ClosureHeader) -> f64;
     fn js_closure_call1(closure: *const ClosureHeader, arg0: f64) -> f64;
     fn js_closure_call2(closure: *const ClosureHeader, arg0: f64, arg1: f64) -> f64;
-    fn js_closure_call3(
-        closure: *const ClosureHeader,
-        arg0: f64,
-        arg1: f64,
-        arg2: f64,
-    ) -> f64;
+    fn js_closure_call3(closure: *const ClosureHeader, arg0: f64, arg1: f64, arg2: f64) -> f64;
     fn js_closure_call4(
         closure: *const ClosureHeader,
         arg0: f64,

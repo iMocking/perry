@@ -412,7 +412,10 @@ pub unsafe extern "C" fn js_net_socket_alloc() -> i64 {
             is_open: false,
         },
     );
-    statics::listeners().lock().unwrap().insert(id, HashMap::new());
+    statics::listeners()
+        .lock()
+        .unwrap()
+        .insert(id, HashMap::new());
     id
 }
 
@@ -525,7 +528,10 @@ fn spawn_socket_task(host: String, port: u16, direct_tls: Option<(String, bool)>
             is_open: false,
         },
     );
-    statics::listeners().lock().unwrap().insert(id, HashMap::new());
+    statics::listeners()
+        .lock()
+        .unwrap()
+        .insert(id, HashMap::new());
 
     spawn_socket_runner(move || {
         Box::pin(async move {
@@ -542,16 +548,17 @@ fn spawn_socket_task(host: String, port: u16, direct_tls: Option<(String, bool)>
             };
 
             let transport = match direct_tls {
-                Some((servername, verify)) => match do_tls_handshake(tcp, &servername, verify).await
-                {
-                    Ok(tls) => Transport::Tls(Box::new(tls)),
-                    Err(e) => {
-                        push_event(PendingNetEvent::Error(id, e));
-                        push_event(PendingNetEvent::Close(id));
-                        mark_closed(id);
-                        return;
+                Some((servername, verify)) => {
+                    match do_tls_handshake(tcp, &servername, verify).await {
+                        Ok(tls) => Transport::Tls(Box::new(tls)),
+                        Err(e) => {
+                            push_event(PendingNetEvent::Error(id, e));
+                            push_event(PendingNetEvent::Close(id));
+                            mark_closed(id);
+                            return;
+                        }
                     }
-                },
+                }
                 None => Transport::Plain(tcp),
             };
 
@@ -825,9 +832,8 @@ pub unsafe extern "C" fn js_net_process_pending() -> i32 {
                     continue;
                 }
                 // POINTER_TAG over the buffer pointer.
-                let buf_f64 = f64::from_bits(
-                    0x7FFD_0000_0000_0000 | (buf as u64 & 0x0000_FFFF_FFFF_FFFF),
-                );
+                let buf_f64 =
+                    f64::from_bits(0x7FFD_0000_0000_0000 | (buf as u64 & 0x0000_FFFF_FFFF_FFFF));
                 for cb in cbs {
                     if cb != 0 {
                         let _ = JsClosure::from_raw(cb as *const RawClosureHeader).call1(buf_f64);

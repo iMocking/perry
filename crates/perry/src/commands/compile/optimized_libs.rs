@@ -113,8 +113,7 @@ pub(super) fn build_optimized_libs(
             let Some(workspace_root) = workspace_root_opt.as_ref() else {
                 continue;
             };
-            let Some(lib_path) =
-                super::well_known::bundled_staticlib_path(workspace_root, binding)
+            let Some(lib_path) = super::well_known::bundled_staticlib_path(workspace_root, binding)
             else {
                 if matches!(format, OutputFormat::Text) && verbose > 0 {
                     eprintln!(
@@ -129,9 +128,7 @@ pub(super) fn build_optimized_libs(
             // covering. `module_to_features` is the same table
             // `compute_required_features` consulted above, so we
             // know exactly what to remove.
-            for feat in
-                crate::commands::stdlib_features::module_to_features(module)
-            {
+            for feat in crate::commands::stdlib_features::module_to_features(module) {
                 features.remove(*feat);
             }
             // perry-ffi's async surface (#466 Phase 1.1 / Phase 5
@@ -147,8 +144,7 @@ pub(super) fn build_optimized_libs(
             // references. Detect async wrappers by checking
             // whether the original feature list contained an
             // async feature; if it did, ensure it stays.
-            let original_features =
-                crate::commands::stdlib_features::module_to_features(module);
+            let original_features = crate::commands::stdlib_features::module_to_features(module);
             if original_features.iter().any(|f| {
                 matches!(
                     *f,

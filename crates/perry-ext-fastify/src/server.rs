@@ -329,10 +329,7 @@ async fn handle_request(
 
 /// Main thread event loop — drains pending requests and runs user
 /// handlers (and lifecycle hooks) synchronously.
-fn event_loop(
-    app_handle: Handle,
-    request_rx: &mut mpsc::Receiver<FastifyPendingRequest>,
-) {
+fn event_loop(app_handle: Handle, request_rx: &mut mpsc::Receiver<FastifyPendingRequest>) {
     loop {
         // Drain microtasks queued by previous handler runs.
         unsafe {

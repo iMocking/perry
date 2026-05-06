@@ -21,7 +21,11 @@ unsafe fn read_string_owned(ptr: *const StringHeader) -> Option<String> {
 
 #[inline]
 fn b(v: bool) -> f64 {
-    if v { 1.0 } else { 0.0 }
+    if v {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 /// `validator.isEmail(str)`.
@@ -31,7 +35,9 @@ fn b(v: bool) -> f64 {
 /// `input_ptr` must be null or a Perry-runtime `StringHeader`.
 #[no_mangle]
 pub unsafe extern "C" fn js_validator_is_email(input_ptr: *const StringHeader) -> f64 {
-    let Some(input) = read_str(input_ptr) else { return 0.0 };
+    let Some(input) = read_str(input_ptr) else {
+        return 0.0;
+    };
     b(validator::ValidateEmail::validate_email(&input))
 }
 
@@ -42,7 +48,9 @@ pub unsafe extern "C" fn js_validator_is_email(input_ptr: *const StringHeader) -
 /// `input_ptr` must be null or a Perry-runtime `StringHeader`.
 #[no_mangle]
 pub unsafe extern "C" fn js_validator_is_url(input_ptr: *const StringHeader) -> f64 {
-    let Some(input) = read_str(input_ptr) else { return 0.0 };
+    let Some(input) = read_str(input_ptr) else {
+        return 0.0;
+    };
     b(validator::ValidateUrl::validate_url(&input))
 }
 
@@ -53,7 +61,9 @@ pub unsafe extern "C" fn js_validator_is_url(input_ptr: *const StringHeader) -> 
 /// `input_ptr` must be null or a Perry-runtime `StringHeader`.
 #[no_mangle]
 pub unsafe extern "C" fn js_validator_is_uuid(input_ptr: *const StringHeader) -> f64 {
-    let Some(input) = read_str(input_ptr) else { return 0.0 };
+    let Some(input) = read_str(input_ptr) else {
+        return 0.0;
+    };
     // Cache the regex so repeated validate calls don't recompile it.
     use std::sync::OnceLock;
     static UUID_RE: OnceLock<regex::Regex> = OnceLock::new();
@@ -73,7 +83,9 @@ pub unsafe extern "C" fn js_validator_is_uuid(input_ptr: *const StringHeader) ->
 /// `input_ptr` must be null or a Perry-runtime `StringHeader`.
 #[no_mangle]
 pub unsafe extern "C" fn js_validator_is_alpha(input_ptr: *const StringHeader) -> f64 {
-    let Some(input) = read_str(input_ptr) else { return 0.0 };
+    let Some(input) = read_str(input_ptr) else {
+        return 0.0;
+    };
     if input.is_empty() {
         return 0.0;
     }
@@ -87,7 +99,9 @@ pub unsafe extern "C" fn js_validator_is_alpha(input_ptr: *const StringHeader) -
 /// `input_ptr` must be null or a Perry-runtime `StringHeader`.
 #[no_mangle]
 pub unsafe extern "C" fn js_validator_is_alphanumeric(input_ptr: *const StringHeader) -> f64 {
-    let Some(input) = read_str(input_ptr) else { return 0.0 };
+    let Some(input) = read_str(input_ptr) else {
+        return 0.0;
+    };
     if input.is_empty() {
         return 0.0;
     }
@@ -101,7 +115,9 @@ pub unsafe extern "C" fn js_validator_is_alphanumeric(input_ptr: *const StringHe
 /// `input_ptr` must be null or a Perry-runtime `StringHeader`.
 #[no_mangle]
 pub unsafe extern "C" fn js_validator_is_numeric(input_ptr: *const StringHeader) -> f64 {
-    let Some(input) = read_string_owned(input_ptr) else { return 0.0 };
+    let Some(input) = read_string_owned(input_ptr) else {
+        return 0.0;
+    };
     if input.is_empty() {
         return 0.0;
     }
@@ -123,7 +139,9 @@ pub unsafe extern "C" fn js_validator_is_numeric(input_ptr: *const StringHeader)
 /// `input_ptr` must be null or a Perry-runtime `StringHeader`.
 #[no_mangle]
 pub unsafe extern "C" fn js_validator_is_int(input_ptr: *const StringHeader) -> f64 {
-    let Some(input) = read_str(input_ptr) else { return 0.0 };
+    let Some(input) = read_str(input_ptr) else {
+        return 0.0;
+    };
     b(input.parse::<i64>().is_ok())
 }
 
@@ -134,7 +152,9 @@ pub unsafe extern "C" fn js_validator_is_int(input_ptr: *const StringHeader) -> 
 /// `input_ptr` must be null or a Perry-runtime `StringHeader`.
 #[no_mangle]
 pub unsafe extern "C" fn js_validator_is_float(input_ptr: *const StringHeader) -> f64 {
-    let Some(input) = read_str(input_ptr) else { return 0.0 };
+    let Some(input) = read_str(input_ptr) else {
+        return 0.0;
+    };
     b(input.parse::<f64>().is_ok())
 }
 
@@ -146,7 +166,9 @@ pub unsafe extern "C" fn js_validator_is_float(input_ptr: *const StringHeader) -
 /// `input_ptr` must be null or a Perry-runtime `StringHeader`.
 #[no_mangle]
 pub unsafe extern "C" fn js_validator_is_hexadecimal(input_ptr: *const StringHeader) -> f64 {
-    let Some(input) = read_str(input_ptr) else { return 0.0 };
+    let Some(input) = read_str(input_ptr) else {
+        return 0.0;
+    };
     if input.is_empty() {
         return 0.0;
     }
@@ -167,7 +189,9 @@ pub unsafe extern "C" fn js_validator_is_hexadecimal(input_ptr: *const StringHea
 /// `input_ptr` must be null or a Perry-runtime `StringHeader`.
 #[no_mangle]
 pub unsafe extern "C" fn js_validator_is_empty(input_ptr: *const StringHeader) -> f64 {
-    let Some(input) = read_str(input_ptr) else { return 1.0 };
+    let Some(input) = read_str(input_ptr) else {
+        return 1.0;
+    };
     b(input.trim().is_empty())
 }
 
@@ -178,7 +202,9 @@ pub unsafe extern "C" fn js_validator_is_empty(input_ptr: *const StringHeader) -
 /// `input_ptr` must be null or a Perry-runtime `StringHeader`.
 #[no_mangle]
 pub unsafe extern "C" fn js_validator_is_json(input_ptr: *const StringHeader) -> f64 {
-    let Some(input) = read_str(input_ptr) else { return 0.0 };
+    let Some(input) = read_str(input_ptr) else {
+        return 0.0;
+    };
     b(serde_json::from_str::<serde_json::Value>(input).is_ok())
 }
 
@@ -192,7 +218,9 @@ pub unsafe extern "C" fn js_validator_is_length_min(
     input_ptr: *const StringHeader,
     min: f64,
 ) -> f64 {
-    let Some(input) = read_str(input_ptr) else { return 0.0 };
+    let Some(input) = read_str(input_ptr) else {
+        return 0.0;
+    };
     b(input.len() >= min as usize)
 }
 
@@ -207,7 +235,9 @@ pub unsafe extern "C" fn js_validator_is_length(
     min: f64,
     max: f64,
 ) -> f64 {
-    let Some(input) = read_str(input_ptr) else { return 0.0 };
+    let Some(input) = read_str(input_ptr) else {
+        return 0.0;
+    };
     let len = input.len();
     b(len >= min as usize && len <= max as usize)
 }
@@ -222,8 +252,12 @@ pub unsafe extern "C" fn js_validator_contains(
     input_ptr: *const StringHeader,
     seed_ptr: *const StringHeader,
 ) -> f64 {
-    let Some(input) = read_str(input_ptr) else { return 0.0 };
-    let Some(seed) = read_str(seed_ptr) else { return 0.0 };
+    let Some(input) = read_str(input_ptr) else {
+        return 0.0;
+    };
+    let Some(seed) = read_str(seed_ptr) else {
+        return 0.0;
+    };
     b(input.contains(seed))
 }
 
@@ -237,8 +271,12 @@ pub unsafe extern "C" fn js_validator_equals(
     input_ptr: *const StringHeader,
     comparison_ptr: *const StringHeader,
 ) -> f64 {
-    let Some(input) = read_str(input_ptr) else { return 0.0 };
-    let Some(comparison) = read_str(comparison_ptr) else { return 0.0 };
+    let Some(input) = read_str(input_ptr) else {
+        return 0.0;
+    };
+    let Some(comparison) = read_str(comparison_ptr) else {
+        return 0.0;
+    };
     b(input == comparison)
 }
 
@@ -250,7 +288,9 @@ pub unsafe extern "C" fn js_validator_equals(
 /// `input_ptr` must be null or a Perry-runtime `StringHeader`.
 #[no_mangle]
 pub unsafe extern "C" fn js_validator_is_lowercase(input_ptr: *const StringHeader) -> f64 {
-    let Some(input) = read_str(input_ptr) else { return 0.0 };
+    let Some(input) = read_str(input_ptr) else {
+        return 0.0;
+    };
     b(input
         .chars()
         .filter(|c| c.is_alphabetic())
@@ -265,7 +305,9 @@ pub unsafe extern "C" fn js_validator_is_lowercase(input_ptr: *const StringHeade
 /// `input_ptr` must be null or a Perry-runtime `StringHeader`.
 #[no_mangle]
 pub unsafe extern "C" fn js_validator_is_uppercase(input_ptr: *const StringHeader) -> f64 {
-    let Some(input) = read_str(input_ptr) else { return 0.0 };
+    let Some(input) = read_str(input_ptr) else {
+        return 0.0;
+    };
     b(input
         .chars()
         .filter(|c| c.is_alphabetic())
@@ -315,7 +357,10 @@ mod tests {
         unsafe {
             assert_eq!(js_validator_is_length(p("hello"), 3.0, 10.0), 1.0);
             assert_eq!(js_validator_is_length(p("hi"), 3.0, 10.0), 0.0);
-            assert_eq!(js_validator_is_length(p("toolongtoolongtoolong"), 3.0, 10.0), 0.0);
+            assert_eq!(
+                js_validator_is_length(p("toolongtoolongtoolong"), 3.0, 10.0),
+                0.0
+            );
         }
     }
 

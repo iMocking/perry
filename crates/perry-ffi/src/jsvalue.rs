@@ -367,12 +367,24 @@ mod tests {
             // Each value should match at most one main predicate
             // (excluding is_number, which overlaps with int32).
             let mut count = 0;
-            if val.is_undefined() { count += 1; }
-            if val.is_null() { count += 1; }
-            if val.is_bool() { count += 1; }
-            if val.is_string() { count += 1; }
-            if val.is_pointer() { count += 1; }
-            if val.is_int32() { count += 1; }
+            if val.is_undefined() {
+                count += 1;
+            }
+            if val.is_null() {
+                count += 1;
+            }
+            if val.is_bool() {
+                count += 1;
+            }
+            if val.is_string() {
+                count += 1;
+            }
+            if val.is_pointer() {
+                count += 1;
+            }
+            if val.is_int32() {
+                count += 1;
+            }
             // Numbers (non-int32) match only `is_number`, not the
             // others — count stays at 0.
             assert!(count <= 1, "{kind} matched multiple main predicates");

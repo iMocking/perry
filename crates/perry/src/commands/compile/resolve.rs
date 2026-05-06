@@ -340,11 +340,7 @@ mod abi_validation_tests {
         // The bundled version is whatever this build is compiled
         // against — by definition the same major.minor as itself.
         let v = PERRY_FFI_ABI_VERSION;
-        let major_minor = v
-            .splitn(3, '.')
-            .take(2)
-            .collect::<Vec<_>>()
-            .join(".");
+        let major_minor = v.splitn(3, '.').take(2).collect::<Vec<_>>().join(".");
         let m = manifest_with_abi(Some(&major_minor));
         assert!(
             validate_abi_version(&m).is_ok(),

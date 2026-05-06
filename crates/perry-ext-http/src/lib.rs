@@ -499,7 +499,10 @@ pub unsafe extern "C" fn js_http_on(
 
     let mut matched = false;
     with_handle_mut::<ClientRequestHandle, _, _>(handle, |req| {
-        req.listeners.entry(event.clone()).or_default().push(callback);
+        req.listeners
+            .entry(event.clone())
+            .or_default()
+            .push(callback);
         matched = true;
     });
     if matched {
@@ -640,10 +643,9 @@ pub unsafe extern "C" fn js_http_process_pending() -> i32 {
                 headers,
                 body,
             } => {
-                let response_callback =
-                    get_handle_mut::<ClientRequestHandle>(request_handle)
-                        .map(|r| r.response_callback)
-                        .unwrap_or(0);
+                let response_callback = get_handle_mut::<ClientRequestHandle>(request_handle)
+                    .map(|r| r.response_callback)
+                    .unwrap_or(0);
 
                 let mut headers_map = HashMap::new();
                 for (k, v) in headers {
@@ -664,8 +666,7 @@ pub unsafe extern "C" fn js_http_process_pending() -> i32 {
                     // `(res) => { ... }` callback. POINTER_TAG so the
                     // closure-arg unboxer extracts the i64.
                     let arg = f64::from_bits(POINTER_TAG | (incoming as u64 & PTR_MASK));
-                    let closure =
-                        JsClosure::from_raw(response_callback as *const RawClosureHeader);
+                    let closure = JsClosure::from_raw(response_callback as *const RawClosureHeader);
                     let _ = closure.call1(arg);
                 }
 
@@ -676,9 +677,7 @@ pub unsafe extern "C" fn js_http_process_pending() -> i32 {
                     .and_then(|r| r.listeners.get("data").cloned())
                     .unwrap_or_default();
                 if !data_listeners.is_empty() && !body_clone.is_empty() {
-                    let s = alloc_string(
-                        std::str::from_utf8(&body_clone).unwrap_or(""),
-                    );
+                    let s = alloc_string(std::str::from_utf8(&body_clone).unwrap_or(""));
                     let arg = f64::from_bits(STRING_TAG | (s.as_raw() as u64 & PTR_MASK));
                     for cb in data_listeners {
                         if cb != 0 {
@@ -776,10 +775,9 @@ mod tests {
 
     #[test]
     fn headers_from_options_extracts() {
-        let v: serde_json::Value = serde_json::from_str(
-            r#"{"headers":{"X-Foo":"bar","Authorization":"Bearer x"}}"#,
-        )
-        .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(r#"{"headers":{"X-Foo":"bar","Authorization":"Bearer x"}}"#)
+                .unwrap();
         let h = headers_from_options(&v);
         assert_eq!(h.get("X-Foo"), Some(&"bar".to_string()));
         assert_eq!(h.get("Authorization"), Some(&"Bearer x".to_string()));

@@ -198,7 +198,10 @@ struct RawQueryResult {
 #[derive(Clone, Debug)]
 enum QueryOutcome {
     Rows(RawQueryResult),
-    Executed { affected_rows: u64, last_insert_id: u64 },
+    Executed {
+        affected_rows: u64,
+        last_insert_id: u64,
+    },
 }
 
 fn extract_raw_value(row: &MySqlRow, index: usize, type_name: &str) -> RawValue {
@@ -292,7 +295,12 @@ fn raw_row_to_js_object(row: &RawRowData) -> *mut ObjectHeader {
     let names: Vec<&str> = row.values.iter().map(|(n, _)| n.as_str()).collect();
     let (packed, shape_id) = build_object_shape(&names);
     let obj = unsafe {
-        js_object_alloc_with_shape(shape_id, names.len() as u32, packed.as_ptr(), packed.len() as u32)
+        js_object_alloc_with_shape(
+            shape_id,
+            names.len() as u32,
+            packed.as_ptr(),
+            packed.len() as u32,
+        )
     };
     for (i, (_, val)) in row.values.iter().enumerate() {
         unsafe { js_object_set_field(obj, i as u32, raw_value_to_jsvalue(val)) };
@@ -302,7 +310,8 @@ fn raw_row_to_js_object(row: &RawRowData) -> *mut ObjectHeader {
 
 fn raw_column_to_field_packet(col: &RawColumnInfo) -> *mut ObjectHeader {
     let (packed, shape_id) = build_object_shape(&["name", "type", "length"]);
-    let obj = unsafe { js_object_alloc_with_shape(shape_id, 3, packed.as_ptr(), packed.len() as u32) };
+    let obj =
+        unsafe { js_object_alloc_with_shape(shape_id, 3, packed.as_ptr(), packed.len() as u32) };
     let name_str = alloc_string(&col.name);
     let type_str = alloc_string(&col.type_name);
     unsafe {
@@ -431,7 +440,9 @@ pub struct MysqlConnectionHandle {
 
 impl MysqlConnectionHandle {
     pub fn new(conn: MySqlConnection) -> Self {
-        Self { connection: Some(conn) }
+        Self {
+            connection: Some(conn),
+        }
     }
 }
 
@@ -924,10 +935,11 @@ mod tests {
     fn is_row_returning_query_classifier() {
         assert!(is_row_returning_query("SELECT 1"));
         assert!(is_row_returning_query("SHOW TABLES"));
-        assert!(is_row_returning_query("WITH cte AS (SELECT 1) SELECT * FROM cte"));
+        assert!(is_row_returning_query(
+            "WITH cte AS (SELECT 1) SELECT * FROM cte"
+        ));
         assert!(!is_row_returning_query("INSERT INTO t VALUES (1)"));
         assert!(!is_row_returning_query("UPDATE t SET x = 1"));
         assert!(!is_row_returning_query("DELETE FROM t"));
     }
-
 }

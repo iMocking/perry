@@ -266,7 +266,11 @@ mod tests {
         };
         assert_ne!(token_bits, 0, "sign returned zero");
         let token = s(token_bits);
-        assert!(token.starts_with("eyJ"), "JWT should start with eyJ: {}", token);
+        assert!(
+            token.starts_with("eyJ"),
+            "JWT should start with eyJ: {}",
+            token
+        );
 
         let token_handle = alloc_string(&token);
         let claims_ptr = unsafe {

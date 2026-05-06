@@ -1517,7 +1517,11 @@ pub extern "C" fn js_buffer_read_uint_le(buf_ptr: f64, offset: i32, byte_length:
 #[inline]
 fn sign_extend(v: u64, bits: u32) -> i64 {
     let sign_bit = 1u64 << (bits - 1);
-    let mask = if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 };
+    let mask = if bits >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    };
     let v = v & mask;
     if v & sign_bit != 0 {
         (v | !mask) as i64
@@ -1565,12 +1569,7 @@ pub extern "C" fn js_buffer_read_int_le(buf_ptr: f64, offset: i32, byte_length: 
 }
 
 #[no_mangle]
-pub extern "C" fn js_buffer_write_uint_be(
-    buf_ptr: f64,
-    value: f64,
-    offset: i32,
-    byte_length: i32,
-) {
+pub extern "C" fn js_buffer_write_uint_be(buf_ptr: f64, value: f64, offset: i32, byte_length: i32) {
     if !(1..=6).contains(&byte_length) {
         return;
     }
@@ -1585,12 +1584,7 @@ pub extern "C" fn js_buffer_write_uint_be(
 }
 
 #[no_mangle]
-pub extern "C" fn js_buffer_write_uint_le(
-    buf_ptr: f64,
-    value: f64,
-    offset: i32,
-    byte_length: i32,
-) {
+pub extern "C" fn js_buffer_write_uint_le(buf_ptr: f64, value: f64, offset: i32, byte_length: i32) {
     if !(1..=6).contains(&byte_length) {
         return;
     }

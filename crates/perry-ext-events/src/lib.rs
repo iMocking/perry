@@ -52,9 +52,8 @@ fn scan_events_roots(mark: &mut dyn FnMut(f64)) {
             for &cb in cb_vec.iter() {
                 if cb != 0 {
                     // POINTER_TAG (0x7FFD) over the closure pointer.
-                    let boxed = f64::from_bits(
-                        0x7FFD_0000_0000_0000 | (cb as u64 & 0x0000_FFFF_FFFF_FFFF),
-                    );
+                    let boxed =
+                        f64::from_bits(0x7FFD_0000_0000_0000 | (cb as u64 & 0x0000_FFFF_FFFF_FFFF));
                     mark(boxed);
                 }
             }
@@ -252,12 +251,8 @@ mod tests {
         let event_name = alloc_string("change");
         // Use a non-zero sentinel for the callback; we never emit
         // here so we don't actually invoke it.
-        let _ = unsafe {
-            js_event_emitter_on(h, event_name.as_raw() as *const _, 0xDEADBEEF_i64)
-        };
-        let _ = unsafe {
-            js_event_emitter_on(h, event_name.as_raw() as *const _, 0xCAFEBABE_i64)
-        };
+        let _ = unsafe { js_event_emitter_on(h, event_name.as_raw() as *const _, 0xDEADBEEF_i64) };
+        let _ = unsafe { js_event_emitter_on(h, event_name.as_raw() as *const _, 0xCAFEBABE_i64) };
         let count = unsafe { js_event_emitter_listener_count(h, event_name.as_raw() as *const _) };
         assert_eq!(count, 2.0);
     }

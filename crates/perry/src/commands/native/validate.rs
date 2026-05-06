@@ -65,8 +65,8 @@ pub fn run(args: ValidateArgs, format: OutputFormat, _use_color: bool) -> Result
         .and_then(|v| v.as_str())
         .map(String::from);
 
-    let crate_name = read_crate_name(&args.path)
-        .context("reading [package].name from Cargo.toml")?;
+    let crate_name =
+        read_crate_name(&args.path).context("reading [package].name from Cargo.toml")?;
 
     if !args.no_build {
         run_cargo_build(&args.path)?;
@@ -115,7 +115,9 @@ pub fn run(args: ValidateArgs, format: OutputFormat, _use_color: bool) -> Result
             );
             println!(
                 "  abiVersion: {}",
-                abi_version.as_deref().unwrap_or("<missing>  ⚠ required from v0.6.0")
+                abi_version
+                    .as_deref()
+                    .unwrap_or("<missing>  ⚠ required from v0.6.0")
             );
             println!("  staticlib:  {}", staticlib.display());
             println!();
