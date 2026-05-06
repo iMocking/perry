@@ -1215,6 +1215,21 @@ pub fn declare_phase_b_objects(module: &mut LlModule) {
     // same register class the runtime actually reads.
     module.declare_function("js_object_set_field", VOID, &[I64, I32, I64]);
     module.declare_function("js_object_set_field_by_name", VOID, &[I64, I64, DOUBLE]);
+    // Closes #471: polymorphic numeric-key set/get used by the IndexSet/Get
+    // fallback when the receiver type isn't statically narrowed to an array.
+    // Dispatches by GC type to either the array setter/getter (preserving
+    // forwarding-chain follow + lazy-array materialize) or the object
+    // setter/getter (after stringifying the index).
+    module.declare_function(
+        "js_object_set_index_polymorphic",
+        VOID,
+        &[I64, DOUBLE, DOUBLE],
+    );
+    module.declare_function(
+        "js_object_get_index_polymorphic",
+        DOUBLE,
+        &[I64, DOUBLE],
+    );
     module.declare_function("js_object_get_field_by_name_f64", DOUBLE, &[I64, I64]);
     module.declare_function("js_object_get_field_ic_miss", DOUBLE, &[I64, I64, PTR]);
     // Object rest destructuring: copy all properties from src except excluded keys.

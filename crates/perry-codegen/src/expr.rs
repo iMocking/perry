@@ -2204,87 +2204,29 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             );
             let str_end_lbl = ctx.block().label.clone();
             ctx.block().br(&merge_lbl);
-            // Numeric key → inline array-style read (offset 8+idx*8).
-            // Note: this path is semantically wrong for TypedArrays (variable
-            // element sizes) but is load-bearing for Object-with-numeric-keys
-            // (constMap[idx] = value) whose property storage happens to share
-            // this offset scheme. Typed-array numeric indexing uses a
-            // dedicated HIR path (TypedArrayGet / TypedArraySet); keep this
-            // inline read for the generic Object fallback to avoid regressing
-            // test_edge_enums_const / test_edge_iteration.
+            // Numeric key → polymorphic dispatch.
             //
-            // Issue #179 Phase 3: if the receiver turns out to be a
-            // lazy JSON-parse array (obj_type == GC_TYPE_LAZY_ARRAY),
-            // reading `obj + 8 + idx*8` returns LazyArrayHeader
-            // fields (root_idx, tape_len, ...) as if they were element
-            // f64s. Same runtime obj_type guard as the typed-array
-            // IndexGet path: route through `js_array_get_f64` →
-            // `clean_arr_ptr` → `force_materialize_lazy` on lazy.
+            // Closes #471 (read side, paired with the IndexSet polymorphic
+            // fix above): the previous fallback emitted an inline
+            // `obj_handle + 8 + idx*8` load on the assumption that the
+            // receiver had an ArrayHeader (8-byte header) layout. Once the
+            // IndexSet path stopped writing through that layout for plain
+            // objects, the read side had to follow — `constMap[i] = v;
+            // constMap[i]` would otherwise set via the object setter
+            // (key stringified into the keys_array) and read from
+            // `obj+8+i*8` (stale ObjectHeader fields), returning garbage
+            // f64 values.
+            //
+            // Route through the runtime which checks the receiver's GC
+            // type and dispatches: arrays/lazy/buffers/typed-arrays
+            // through js_array_get_f64 (handles forwarding-chain follow
+            // + lazy-materialize + per-kind reads), plain objects
+            // through stringify-the-index + js_object_get_field_by_name_f64.
             ctx.current_block = num_idx;
-            let idx_i32 = ctx.block().fptosi(DOUBLE, &idx_box, I32);
-            let lazy_gc_type_addr = ctx.block().sub(I64, &obj_handle, "8");
-            let lazy_gc_type_ptr = ctx.block().inttoptr(I64, &lazy_gc_type_addr);
-            let lazy_gc_type = ctx.block().load(I8, &lazy_gc_type_ptr);
-            let is_lazy = ctx.block().icmp_eq(I8, &lazy_gc_type, "9"); // GC_TYPE_LAZY_ARRAY
-                                                                       // Issue #233: also detect FORWARDED arrays (post-grow
-                                                                       // stale pointers from async-fn parameter handoff).
-            let lazy_gc_flags_addr = ctx.block().sub(I64, &obj_handle, "7");
-            let lazy_gc_flags_ptr = ctx.block().inttoptr(I64, &lazy_gc_flags_addr);
-            let lazy_gc_flags = ctx.block().load(I8, &lazy_gc_flags_ptr);
-            let lazy_fwd_bits = ctx.block().and(I8, &lazy_gc_flags, "128");
-            let is_lazy_fwd = ctx.block().icmp_ne(I8, &lazy_fwd_bits, "0");
-            let lazy_needs_slow = ctx.block().or(I1, &is_lazy, &is_lazy_fwd);
-            let num_lazy_idx = ctx.new_block("iget.num.lazy");
-            let num_fast_idx = ctx.new_block("iget.num.fast");
-            let num_inner_merge_idx = ctx.new_block("iget.num.merge");
-            let num_lazy_lbl = ctx.block_label(num_lazy_idx);
-            let num_fast_lbl = ctx.block_label(num_fast_idx);
-            let num_inner_merge_lbl = ctx.block_label(num_inner_merge_idx);
-            ctx.block()
-                .cond_br(&lazy_needs_slow, &num_lazy_lbl, &num_fast_lbl);
-
-            ctx.current_block = num_lazy_idx;
-            let v_num_lazy = ctx.block().call(
+            let v_num = ctx.block().call(
                 DOUBLE,
-                "js_array_get_f64",
-                &[(I64, &obj_handle), (I32, &idx_i32)],
-            );
-            let num_lazy_end_lbl = ctx.block().label.clone();
-            ctx.block().br(&num_inner_merge_lbl);
-
-            ctx.current_block = num_fast_idx;
-            let idx_i64 = ctx.block().zext(I32, &idx_i32, I64);
-            let byte_off = ctx.block().shl(I64, &idx_i64, "3");
-            let with_hdr = ctx.block().add(I64, &byte_off, "8");
-            let elem_addr = ctx.block().add(I64, &obj_handle, &with_hdr);
-            let elem_ptr = ctx.block().inttoptr(I64, &elem_addr);
-            let v_num_raw = ctx.block().load(DOUBLE, &elem_ptr);
-            // Issue #323: HOLE → UNDEFINED translation for `new Array(n)` slots
-            // (see the bounded-index path in IndexGet for context).
-            let v_num_raw_bits = ctx.block().bitcast_double_to_i64(&v_num_raw);
-            let v_num_is_hole =
-                ctx.block()
-                    .icmp_eq(I64, &v_num_raw_bits, crate::nanbox::TAG_HOLE_I64);
-            let v_num_undef = ctx
-                .block()
-                .bitcast_i64_to_double(crate::nanbox::TAG_UNDEFINED_I64);
-            let v_num_fast = ctx.block().select(
-                crate::types::I1,
-                &v_num_is_hole,
-                DOUBLE,
-                &v_num_undef,
-                &v_num_raw,
-            );
-            let num_fast_end_lbl = ctx.block().label.clone();
-            ctx.block().br(&num_inner_merge_lbl);
-
-            ctx.current_block = num_inner_merge_idx;
-            let v_num = ctx.block().phi(
-                DOUBLE,
-                &[
-                    (&v_num_lazy, &num_lazy_end_lbl),
-                    (&v_num_fast, &num_fast_end_lbl),
-                ],
+                "js_object_get_index_polymorphic",
+                &[(I64, &obj_handle), (DOUBLE, &idx_box)],
             );
             let num_end_lbl = ctx.block().label.clone();
             ctx.block().br(&merge_lbl);
@@ -2804,63 +2746,36 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 ],
             );
             ctx.block().br(&merge_lbl);
-            // Numeric key → inline array-style write (offset 8+idx*8).
-            // See IndexGet comment above: this fallback is wrong for TypedArray
-            // element sizes but is load-bearing for Object-with-numeric-keys
-            // storage, so we preserve the pre-#157 inline scheme here. Typed-
-            // array writes go through TypedArraySet which stores via
-            // `js_typed_array_set` with the correct per-kind width.
+            // Numeric key → polymorphic dispatch.
             //
-            // Issue #412 follow-up: when the receiver is a stale post-grow
-            // array pointer (forwarding marker installed at OLD location by
-            // js_array_grow), the inline `obj_handle + 8 + idx*8` store
-            // writes into OLD's buffer footprint — which is shorter than
-            // the logical length implies, corrupting the next allocation.
-            // Check GC_FLAG_FORWARDED at handle-7; if set, route through
-            // js_array_set_f64_extend whose clean_arr_ptr_mut follows the
-            // forwarding chain to the live new array. Same pattern as
-            // lower_index_set_fast and the IndexGet hot path.
+            // Closes #471: the previous fallback emitted an inline
+            // `obj_handle + 8 + idx*8` store on the assumption that the
+            // receiver had an ArrayHeader (8-byte header) layout. That's
+            // a load-bearing assumption for `arr[i] = v` against an
+            // unknown-typed receiver where `is_array_expr` couldn't
+            // narrow it statically — but ObjectHeader is 24 bytes plus
+            // `max(field_count, 8)` inline slots, so writing at offset
+            // `8 + idx*8` for any `idx ≥ 7` overflows the object's
+            // allocation and corrupts the adjacent heap object. The
+            // @perryts/mongodb #471 repro hit this with `idMap[i] = …`
+            // (a `Record<number, unknown>`) and trampled the keys_array
+            // of an unrelated object that the BSON encoder later read
+            // as an empty doc, producing structurally-truncated wire data.
+            //
+            // Route through the runtime which checks the receiver's GC
+            // type and dispatches: arrays/buffers/typed-arrays through
+            // js_array_set_f64_extend (handles forwarding + per-kind
+            // stores), plain objects through stringify-the-index +
+            // js_object_set_field_by_name. The forwarding-chain handling
+            // that the previous code's inline-vs-fwd branch did is now
+            // inside js_array_set_f64_extend's clean_arr_ptr_mut.
             ctx.current_block = num_set;
             {
                 let blk = ctx.block();
-                let idx_i32 = blk.fptosi(DOUBLE, &idx_box, I32);
-                let gc_flags_addr = blk.sub(I64, &obj_handle, "7");
-                let gc_flags_ptr = blk.inttoptr(I64, &gc_flags_addr);
-                let gc_flags = blk.load(I8, &gc_flags_ptr);
-                let fwd_bits = blk.and(I8, &gc_flags, "128");
-                let is_fwd = blk.icmp_ne(I8, &fwd_bits, "0");
-                let fwd_lbl_idx = ctx.new_block("iset.num.fwd");
-                let inline_lbl_idx = ctx.new_block("iset.num.inline");
-                let num_done_idx = ctx.new_block("iset.num.done");
-                let fwd_lbl = ctx.block_label(fwd_lbl_idx);
-                let inline_lbl = ctx.block_label(inline_lbl_idx);
-                let num_done_lbl = ctx.block_label(num_done_idx);
-                ctx.block().cond_br(&is_fwd, &fwd_lbl, &inline_lbl);
-
-                ctx.current_block = fwd_lbl_idx;
-                {
-                    let blk = ctx.block();
-                    blk.call(
-                        I64,
-                        "js_array_set_f64_extend",
-                        &[(I64, &obj_handle), (I32, &idx_i32), (DOUBLE, &val_double)],
-                    );
-                    blk.br(&num_done_lbl);
-                }
-
-                ctx.current_block = inline_lbl_idx;
-                {
-                    let blk = ctx.block();
-                    let idx_i64 = blk.zext(I32, &idx_i32, I64);
-                    let byte_off = blk.shl(I64, &idx_i64, "3");
-                    let with_hdr = blk.add(I64, &byte_off, "8");
-                    let elem_addr = blk.add(I64, &obj_handle, &with_hdr);
-                    let elem_ptr = blk.inttoptr(I64, &elem_addr);
-                    blk.store(DOUBLE, &val_double, &elem_ptr);
-                    blk.br(&num_done_lbl);
-                }
-
-                ctx.current_block = num_done_idx;
+                blk.call_void(
+                    "js_object_set_index_polymorphic",
+                    &[(I64, &obj_handle), (DOUBLE, &idx_box), (DOUBLE, &val_double)],
+                );
             }
             ctx.block().br(&merge_lbl);
             ctx.current_block = set_merge;
