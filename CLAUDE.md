@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.601
+**Current Version:** 0.5.602
 
 
 ## TypeScript Parity Status
@@ -152,6 +152,8 @@ First-resolved directory cached in `compile_package_dirs`; subsequent imports re
 ## Recent Changes
 
 One-liners only — full detail in CHANGELOG.md.
+
+- **v0.5.602** — **Closes #509** (parallel-codegen race producing colliding object files): two rayon codegen workers compiling sibling modules within the same microsecond ended up writing to the same `/tmp/perry_llvm_<pid>_<nanos>.ll` path. Both overwrote the same `.ll`, both `clang -c` invocations compiled the same IR, both read back the same `.o` bytes — leaving sibling `.o` files (e.g. `consumer_type_only.o` and `consumer_value.o`) with one module's symbols stamped onto the other's filename. Linker then rejected the unresolved cross-module symbols (`_perry_fn_..._consumeTypeOnly`, `_fixtures_issue_446_pkg_consumer_type_only_ts__init`). Surfaced after v0.5.589 (closure rest registry shifted codegen timing into the failure window); the underlying race had been latent since `compile_ll_to_object` was written. Root cause in `crates/perry-codegen/src/linker.rs::compile_ll_to_object`: the temp-path nonce was `SystemTime::now().duration_since(UNIX_EPOCH).as_nanos()`, but macOS `SystemTime` resolves to microseconds — so two threads racing the path construction within ~1µs produced byte-identical `nanos` values. Fix: new module-level `static TEMP_NONCE_COUNTER: AtomicU64 = AtomicU64::new(0)` is `fetch_add(1, Relaxed)`-incremented on every call and mixed into the path alongside the existing pid + wall-clock nanos. The atomic counter guarantees in-process uniqueness regardless of clock resolution; pid + wall nanos preserve cross-process distinctness for two `perry` invocations sharing `/tmp`. New regression test `temp_nonce_counter_is_unique_across_concurrent_calls` spawns 16 threads × 16 fetches and asserts all 256 values are distinct. With the fix, `test_issue_446_import_type_method_typeof` and `test_issue_310_namespace_reexport` (the two `known_failures.json` entries tracking this race) link cleanly and produce correct output; both removed from the skip list.
 
 - **v0.5.601** — **Closes #519** (hono `app.fetch()` chain unblocked: cross-instance method-style calls now bind `this` correctly): `instance.fn(args)` where `fn` is a closure-typed class field — hono's `RegExpRouter { match = match; }` (where `match` is the imported function declaration from matcher.js) — was reaching its function body with `this = 0` because perry's closure ABI takes `(closure_ptr, arg0, …)` with no `this` slot. The function body's `this.buildAllMatchers()` then fell through to issue #510's catch-all `(number).buildAllMatchers is not a function`. Three coordinated fixes:
 

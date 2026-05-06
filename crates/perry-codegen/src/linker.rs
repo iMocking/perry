@@ -11,6 +11,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 use anyhow::{anyhow, Context, Result};
@@ -18,6 +19,16 @@ use anyhow::{anyhow, Context, Result};
 /// Cached result of the pre-flight clang probe — evaluated once per process.
 /// `Some(default_triple)` if the probe succeeded, `None` if it failed.
 static CLANG_PROBE: OnceLock<Option<String>> = OnceLock::new();
+
+/// Strictly-monotonic per-process counter mixed into temp .ll/.o paths so two
+/// rayon codegen workers calling `compile_ll_to_object` concurrently can never
+/// land on the same path. SystemTime::now().as_nanos() alone isn't enough —
+/// macOS clocks resolve to microseconds, and rayon happily schedules sibling
+/// modules within the same microsecond, producing identical paths. When that
+/// happens, both workers overwrite the same .ll, both invoke clang on it, and
+/// both read back identical bytes — leaving sibling .o files with one
+/// module's symbols stamped onto the other's filename. (Closes #509.)
+static TEMP_NONCE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Compile LLVM IR text to an object file using the system `clang`, returning
 /// the object file bytes.
@@ -29,12 +40,17 @@ static CLANG_PROBE: OnceLock<Option<String>> = OnceLock::new();
 pub fn compile_ll_to_object(ll_text: &str, target_triple: Option<&str>) -> Result<Vec<u8>> {
     let tmp_dir = env::temp_dir();
     let pid = std::process::id();
-    let nonce = std::time::SystemTime::now()
+    // Per-call unique counter — strictly monotonic, no collisions across
+    // rayon workers in the same process. We still mix in the wall-clock
+    // nanos for cross-process distinctness (two `perry` invocations can
+    // share /tmp), but the counter is what guarantees in-process safety.
+    let counter = TEMP_NONCE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let wall_nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let ll_path = tmp_dir.join(format!("perry_llvm_{}_{}.ll", pid, nonce));
-    let obj_path = tmp_dir.join(format!("perry_llvm_{}_{}.o", pid, nonce));
+    let ll_path = tmp_dir.join(format!("perry_llvm_{}_{}_{}.ll", pid, wall_nonce, counter));
+    let obj_path = tmp_dir.join(format!("perry_llvm_{}_{}_{}.o", pid, wall_nonce, counter));
 
     {
         let mut f = fs::File::create(&ll_path)
@@ -701,5 +717,46 @@ mod tests {
             hint
         );
         assert!(hint.contains("arm64-apple-macosx15.0.0"));
+    }
+
+    #[test]
+    fn temp_nonce_counter_is_unique_across_concurrent_calls() {
+        // Regression test for #509: two rayon workers calling
+        // `compile_ll_to_object` concurrently must NOT generate the same
+        // temp-file path. Pre-fix, the path was `perry_llvm_<pid>_<nanos>`
+        // where `nanos` came from `SystemTime::now().as_nanos()`. On macOS
+        // that resolves to microseconds, so two threads racing the path
+        // construction in the same microsecond produced identical paths,
+        // both overwrote the same .ll, and both clang invocations compiled
+        // the same IR — leaving sibling .o files with identical bytes.
+        //
+        // The fix mixes `TEMP_NONCE_COUNTER.fetch_add(1, Relaxed)` into
+        // the path. We verify here that 256 concurrent fetches produce
+        // 256 distinct values, regardless of clock resolution.
+        use std::collections::HashSet;
+        use std::thread;
+
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            handles.push(thread::spawn(|| {
+                let mut local: Vec<u64> = Vec::with_capacity(16);
+                for _ in 0..16 {
+                    local.push(TEMP_NONCE_COUNTER.fetch_add(1, Ordering::Relaxed));
+                }
+                local
+            }));
+        }
+        let mut all: Vec<u64> = Vec::with_capacity(256);
+        for h in handles {
+            all.extend(h.join().unwrap());
+        }
+        let unique: HashSet<u64> = all.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            all.len(),
+            "TEMP_NONCE_COUNTER produced duplicate values: total={}, unique={}",
+            all.len(),
+            unique.len(),
+        );
     }
 }
