@@ -1896,8 +1896,25 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
                         // which calls the runtime with the implicit
                         // "default" label.
                     }
+                    "log" | "info" | "debug" => {
+                        // Issue #557: zero-arg console.log()/info()/debug()
+                        // emits a newline to stdout (matches Node/bun). The
+                        // *_spread runtime fns already print just `\n` when
+                        // their arg is null, so pass i64 0 directly.
+                        ctx.block().call_void("js_console_log_spread", &[(I64, "0")]);
+                        return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
+                    }
+                    "warn" => {
+                        ctx.block().call_void("js_console_warn_spread", &[(I64, "0")]);
+                        return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
+                    }
+                    "error" => {
+                        ctx.block().call_void("js_console_error_spread", &[(I64, "0")]);
+                        return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
+                    }
                     _ => {
-                        // log/info/warn/error/debug/etc. — print nothing.
+                        // Other zero-arg console.* methods (dir, assert,
+                        // etc.) — print nothing.
                         return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
                     }
                 }
