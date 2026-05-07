@@ -84,7 +84,10 @@ define_class!(
     impl PerryAppDelegate {
         #[unsafe(method(application:didFinishLaunchingWithOptions:))]
         fn did_finish_launching(&self, _application: &AnyObject, _options: *const AnyObject) -> bool {
-            // Window creation is handled by PerrySceneDelegate
+            // Window creation is handled by PerrySceneDelegate.
+            // Drain pending BGTaskScheduler registrations from `registerTask`
+            // calls during module init (#538).
+            crate::background::flush_pending_registrations();
             true
         }
     }

@@ -6,6 +6,7 @@
 
 pub mod app;
 pub mod audio;
+pub mod background;
 pub mod media_playback;
 pub mod state;
 pub mod tree;
@@ -1447,3 +1448,29 @@ pub extern "C" fn perry_ui_image_gallery_create(_on_index_change: f64) -> i64 { 
 pub extern "C" fn perry_ui_image_gallery_add_image(_handle: i64, _url_ptr: i64, _alt_ptr: i64) {}
 #[no_mangle]
 pub extern "C" fn perry_ui_image_gallery_set_index(_handle: i64, _index: i64) {}
+
+// ---- perry/background (issue #538) — WKApplication.scheduleBackgroundRefresh ----
+#[no_mangle]
+pub extern "C" fn perry_background_register_task(identifier_ptr: i64, handler: f64) {
+    background::register_task(identifier_ptr as *const u8, handler);
+}
+#[no_mangle]
+pub extern "C" fn perry_background_schedule(
+    identifier_ptr: i64,
+    kind_ptr: i64,
+    earliest_start_ms: f64,
+    requires_network: f64,
+    requires_charging: f64,
+) {
+    background::schedule(
+        identifier_ptr as *const u8,
+        kind_ptr as *const u8,
+        earliest_start_ms,
+        requires_network,
+        requires_charging,
+    );
+}
+#[no_mangle]
+pub extern "C" fn perry_background_cancel(identifier_ptr: i64) {
+    background::cancel(identifier_ptr as *const u8);
+}

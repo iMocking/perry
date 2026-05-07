@@ -239,6 +239,10 @@ pub fn app_run(_app_handle: i64) {
     crate::crash_log::install_crash_hooks();
     register_cross_platform_text_handlers();
     register_view_controller();
+    // Drain pending BGTaskScheduler registrations from `registerTask`
+    // calls during module init (#538). Runs before the SwiftUI host
+    // takes over UIApplicationMain.
+    crate::background::flush_pending_registrations();
 
     // Register UI function pointers for geisterhand dispatch
     #[cfg(feature = "geisterhand")]

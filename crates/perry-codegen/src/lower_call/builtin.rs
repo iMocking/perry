@@ -28,6 +28,41 @@ pub(super) fn lower_builtin_new(
     args: &[Expr],
 ) -> Result<Option<String>> {
     match class_name {
+        // `new RegExp(pattern)` / `new RegExp(pattern, flags)` — call
+        // js_regexp_new directly so the resulting object is a real
+        // RegExpHeader (registered in REGEX_POINTERS, .test/.exec/etc
+        // dispatch correctly). Refs #486 — hono's `buildWildcardRegExp`
+        // does `new RegExp(path === "*" ? "" : ...)`. Pre-fix, the
+        // generic Expr::New path fell through to the placeholder
+        // js_object_alloc(0,0) and the resulting "fake regex" never
+        // actually matched anything (`.test("/")` returned false on every
+        // input — caused middleware-vs-route lookup in
+        // RegExpRouter.add's wildcard branch to skip every push, leaving
+        // matchResult[0] missing the middleware entry). Compile-time
+        // RegExp LITERALS (`/foo/g`) already lower through Expr::RegExp
+        // at expr.rs:4964 — this arm covers the runtime `new RegExp(arg)`
+        // form where the pattern argument is a non-literal expression.
+        "RegExp" => {
+            let pattern_box = if !args.is_empty() {
+                lower_expr(ctx, &args[0])?
+            } else {
+                double_literal(0.0)
+            };
+            let flags_box = if args.len() > 1 {
+                lower_expr(ctx, &args[1])?
+            } else {
+                double_literal(0.0)
+            };
+            let blk = ctx.block();
+            let pattern_handle = unbox_to_i64(blk, &pattern_box);
+            let flags_handle = unbox_to_i64(blk, &flags_box);
+            let handle = blk.call(
+                I64,
+                "js_regexp_new",
+                &[(I64, &pattern_handle), (I64, &flags_handle)],
+            );
+            Ok(Some(nanbox_pointer_inline(blk, &handle)))
+        }
         // commander Command — `new Command()` allocates a real CommanderHandle
         // via the runtime constructor so subsequent `.command(...).action(...)
         // .parse(...)` calls operate on a registered handle. Without this,

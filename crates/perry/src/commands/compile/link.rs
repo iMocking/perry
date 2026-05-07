@@ -1071,6 +1071,8 @@ pub(super) fn build_and_run_link(
             .arg("MapKit") // perry/ui MapView (#517) — MKMapView (visionOS)
             .arg("-framework")
             .arg("PDFKit") // perry/ui PdfView (#516) — PDFView (visionOS)
+            .arg("-framework")
+            .arg("BackgroundTasks") // perry/background BGTaskScheduler (#538)
             .arg("-liconv")
             .arg("-lresolv")
             .arg("-lobjc")
@@ -1101,6 +1103,8 @@ pub(super) fn build_and_run_link(
             .arg("MapKit") // perry/ui MapView (#517) — MKMapView (tvOS)
             .arg("-framework")
             .arg("MediaPlayer") // perry/media — Now Playing + Siri Remote
+            .arg("-framework")
+            .arg("BackgroundTasks") // perry/background BGTaskScheduler (#538)
             .arg("-liconv")
             .arg("-lresolv")
             .arg("-lobjc")

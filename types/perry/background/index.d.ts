@@ -1,25 +1,44 @@
 // Type declarations for perry/background — deferred / periodic background work
 // (issue #538). Maps to BGTaskScheduler on iOS and WorkManager on Android.
 //
-// iOS:     BGTaskScheduler.shared. The identifier passed to `registerTask`
+// iOS:     `BGTaskScheduler.shared`. The identifier passed to `registerTask`
 //          MUST also be listed in Info.plist under
-//          `BGTaskSchedulerPermittedIdentifiers`. `registerTask` itself MUST
-//          be invoked at module-init time, BEFORE the app's run-loop starts —
-//          BGTaskScheduler enforces a "register all handlers during launch"
-//          contract; calling later silently throws an internal NSException
-//          and the task is never delivered. Background time budget is
-//          ~30 s for `appRefresh` and several minutes for `processing`.
-// Android: androidx.work:work-runtime. Backed by a `Worker` whose `doWork`
-//          calls back into Perry through the registered handler. Periodic
-//          schedules enforce a 15-minute minimum interval (system-wide
-//          constraint). The `processing` kind maps to `OneTimeWorkRequest`
-//          with the same `requiresNetwork` / `requiresCharging` constraints
-//          as the iOS BGProcessingTaskRequest.
-// Other targets (macOS / tvOS / watchOS / visionOS / GTK4 / Windows / Web):
-//          no-op stubs — `registerTask` records the handler but it is
-//          never invoked, and `schedule` / `cancel` are no-ops. Apps
-//          targeting only these platforms should branch via
-//          `getDeviceIdiom()` rather than relying on background wakeups.
+//          `BGTaskSchedulerPermittedIdentifiers`. `registerTask` itself
+//          MUST be invoked at module-init time, BEFORE the app's run-loop
+//          starts — Perry's app delegate flushes the handler registry
+//          during `application:didFinishLaunchingWithOptions:`, and Apple
+//          rejects late registrations. Background time budget is ~30 s
+//          for `appRefresh`, several minutes for `processing`.
+// Android: `androidx.work:work-runtime`. Backed by `OneTimeWorkRequest` +
+//          a `PerryBackgroundWorker` whose `doWork` calls back into the
+//          registered handler. The `processing` kind maps to the same
+//          `OneTimeWorkRequest` shape with `requiresNetwork` /
+//          `requiresCharging` constraints applied via `Constraints`.
+// tvOS:    `BGTaskScheduler` (tvOS 13+). Same surface as iOS. Practical
+//          caveat: tvOS apps only run while the box is on; "background"
+//          here means "while a different app is active" or "during the
+//          screen-saver", not while the box is sleeping.
+// visionOS: `BGTaskScheduler` (visionOS 1.0+). Same surface as iOS.
+//          Registration is flushed from Perry's `app_run` before the
+//          SwiftUI host takes over UIApplicationMain.
+// watchOS: `WKApplication.scheduleBackgroundRefresh(...)` (watchOS 7+).
+//          Only the `appRefresh` kind has a watchOS equivalent;
+//          `processing` is accepted but treated identically.
+//          `requiresNetwork` / `requiresCharging` are advisory — the OS
+//          decides scheduling based on its own conditions. There is no
+//          native cancel API on watchOS; `cancel(id)` removes the
+//          handler so a fired refresh becomes a no-op.
+// macOS:   `NSBackgroundActivityScheduler` (10.10+). Different model from
+//          iOS — the scheduler fires while the app is running, with
+//          `interval`/`tolerance` derived from `earliestStartMs`.
+// GTK4 (Linux) and Windows: NO real impl — desktop OSes don't expose an
+//          app-managed "wake up while not running" pipeline that doesn't
+//          require admin elevation (Win Task Scheduler) or deploy-time
+//          configuration (systemd timer / MSIX background-task manifest).
+//          `registerTask`, `schedule`, and `cancel` are silent no-ops on
+//          these targets. For periodic refresh while the app IS running,
+//          use `setInterval()` directly.
+// Web:     no-op stubs.
 
 /** Async or sync handler invoked when the OS wakes the app for a registered
  *  task. The OS gives Perry a fixed budget (~30 s on iOS appRefresh;

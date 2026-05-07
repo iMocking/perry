@@ -6,10 +6,16 @@
 
 import SwiftUI
 import MapKit
+import WatchKit
 
 // MARK: - FFI declarations
 
 @_silgen_name("perry_main_init") func perry_main_init()
+// perry/background (#538) — WKApplicationDelegate.handle(_:) routes
+// each delivered WKRefreshBackgroundTask's `userInfo["perry_id"]`
+// here so Rust can dispatch the right registered handler.
+@_silgen_name("perry_watchos_dispatch_background_task")
+func perry_watchos_dispatch_background_task(_ id: UnsafePointer<CChar>)
 
 // Tree query
 @_silgen_name("perry_watchos_root_node") func perry_watchos_root_node() -> Int64
@@ -423,8 +429,32 @@ struct CommonModifiers: ViewModifier {
 
 // MARK: - App entry point
 
+// perry/background (#538) — receive WKRefreshBackgroundTask deliveries.
+// Reads our `userInfo["perry_id"]` and forwards to Rust; calls
+// `setTaskCompletedWithSnapshot(false)` on each task to release the OS budget.
+final class PerryWatchAppDelegate: NSObject, WKApplicationDelegate {
+    func handle(_ backgroundTasks: Set<WKRefreshBackgroundTask>) {
+        for task in backgroundTasks {
+            if let refresh = task as? WKApplicationRefreshBackgroundTask {
+                if let info = refresh.userInfo as? [String: Any],
+                   let id = info["perry_id"] as? String {
+                    id.withCString { cstr in
+                        perry_watchos_dispatch_background_task(cstr)
+                    }
+                }
+                refresh.setTaskCompletedWithSnapshot(false)
+            } else {
+                // Other refresh kinds (URLSession, snapshot, etc.) are not
+                // currently routed through perry/background.
+                task.setTaskCompletedWithSnapshot(false)
+            }
+        }
+    }
+}
+
 @main
 struct PerryApp: App {
+    @WKApplicationDelegateAdaptor(PerryWatchAppDelegate.self) var appDelegate
     @StateObject private var bridge = PerryBridge()
 
     init() {

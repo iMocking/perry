@@ -65,11 +65,23 @@ pub extern "C" fn perry_system_image_picker_pick(
     }
 }
 
-// ---- perry/background (issue #538) — no-op stubs. ----
-// This platform has no native deferred-background-work API exposed to
-// non-system apps; `registerTask` records nothing, `schedule` and `cancel`
-// are silent no-ops. Apps targeting only this platform should branch via
-// `getDeviceIdiom()` and skip the background path.
+// ---- perry/background (issue #538) — no-op stubs on Windows. ----
+//
+// Win32 has no Perry-callable equivalent for "wake up an otherwise-not-
+// running desktop app on a schedule" that doesn't require either:
+//   - admin elevation (Task Scheduler API — `ITaskService::NewTask` plus
+//     `RegisterTaskDefinition` requires the calling user to have Schedule
+//     Tasks rights; ordinary user-installed apps can register but the
+//     trigger only fires while the user is logged in, and the
+//     registration step itself prompts UAC),
+//   - or the app to be a packaged WinUI 3 / UWP app (MSIX) that declares
+//     `<BackgroundTasks>` extensions in its appxmanifest and provides a
+//     dedicated background-task handler component. Perry-compiled apps
+//     are plain Win32 executables, not MSIX packages.
+// A Perry Windows app that wants periodic refresh while the app IS
+// running can use `setInterval()` — the OS-managed wake-up-while-
+// suspended contract is unavailable to plain Win32. `registerTask`
+// records nothing; `schedule` and `cancel` are silent no-ops.
 #[no_mangle]
 pub extern "C" fn perry_background_register_task(_identifier_ptr: i64, _handler: f64) {}
 #[no_mangle]

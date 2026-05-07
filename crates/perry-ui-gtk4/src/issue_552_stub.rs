@@ -65,7 +65,19 @@ pub extern "C" fn perry_system_image_picker_pick(
     }
 }
 
-// ---- perry/background (issue #538) — no-op stubs. ----
+// ---- perry/background (issue #538) — no-op stubs on GTK4 / Linux. ----
+//
+// Linux desktop has no Perry-callable equivalent for "wake up an
+// otherwise-not-running app on a schedule". The closest pieces are:
+//   - systemd `--user` timer units (deploy-time XML config, not a runtime
+//     API the app can register against from JS)
+//   - cron / anacron (administrator-managed, requires editing crontab)
+// Both belong to the install/deploy step, not to the application surface
+// area Perry exposes. A Perry GTK4 app that wants periodic refresh while
+// the app IS running can use a regular `setInterval()` — the OS-managed
+// wake-up-while-suspended contract simply doesn't exist for GUI apps on
+// Linux. `registerTask` records nothing; `schedule` and `cancel` are
+// silent no-ops.
 #[no_mangle]
 pub extern "C" fn perry_background_register_task(_identifier_ptr: i64, _handler: f64) {}
 #[no_mangle]
