@@ -354,10 +354,45 @@ pub fn app_run(_app_handle: i64) {
         }
     }
 
+    register_cross_platform_text_handlers();
+
     // GTK Application::run() blocks like NSApplication.run()
     // Pass empty args since we handle our own argument parsing
     let empty: Vec<String> = vec![];
     app.run_with_args(&empty);
+}
+
+// =============================================================================
+// Cross-platform showToast / setText / NavStack-hidden handler registration.
+// Issue #535: routes runtime-side state writes (`js_state_set`,
+// `perry_arkts_set_text`, `perry_arkts_show_toast`) to GTK4 widget mutations.
+// =============================================================================
+
+extern "C" {
+    fn js_register_show_toast_handler(f: extern "C" fn(msg_ptr: *const u8, msg_len: usize));
+    fn js_register_set_text_handler(
+        f: extern "C" fn(id_ptr: *const u8, id_len: usize, val_ptr: *const u8, val_len: usize),
+    );
+    fn js_register_text_id_handler(
+        f: extern "C" fn(widget_handle: i64, id_ptr: *const u8, id_len: usize),
+    );
+    /// Issue #535 Layer 2 — `js_state_set` calls this for every NavStack
+    /// route bound to the changed state's synth id. Defined in
+    /// `perry-runtime/src/ui_text_registry.rs`'s `NAVSTACK_REGISTRY` block.
+    fn js_register_widget_hidden_handler(f: extern "C" fn(widget_handle: i64, hidden: i32));
+}
+
+extern "C" fn navstack_set_widget_hidden(widget_handle: i64, hidden: i32) {
+    crate::widgets::set_hidden(widget_handle, hidden != 0);
+}
+
+fn register_cross_platform_text_handlers() {
+    unsafe {
+        js_register_show_toast_handler(crate::widgets::toast::show_toast_handler);
+        js_register_set_text_handler(crate::widgets::text_registry::set_text_handler);
+        js_register_text_id_handler(crate::widgets::text_registry::register_text_id_handler);
+        js_register_widget_hidden_handler(navstack_set_widget_hidden);
+    }
 }
 
 /// Set the minimum window size.

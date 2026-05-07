@@ -22,6 +22,19 @@ pub fn show_toast(message: &str) {
     pump_queue();
 }
 
+/// Cross-platform handler registered with `js_register_show_toast_handler`
+/// at app startup.
+pub extern "C" fn show_toast_handler(msg_ptr: *const u8, msg_len: usize) {
+    if msg_ptr.is_null() {
+        return;
+    }
+    let msg = unsafe {
+        let bytes = std::slice::from_raw_parts(msg_ptr, msg_len);
+        String::from_utf8_lossy(bytes).into_owned()
+    };
+    show_toast(&msg);
+}
+
 /// Show the next queued message (no-op if one is already visible).
 fn pump_queue() {
     let active = TOAST_ACTIVE.with(|a| *a.borrow());

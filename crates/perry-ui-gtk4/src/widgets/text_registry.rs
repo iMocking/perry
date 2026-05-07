@@ -19,3 +19,41 @@ pub fn set_text_for_id(id: &str, value: &str) {
         super::text::set_text_str(h, value);
     }
 }
+
+/// Cross-platform handler registered with `js_register_text_id_handler`
+/// at app startup. Issue #535 Layer 1.
+pub extern "C" fn register_text_id_handler(widget_handle: i64, id_ptr: *const u8, id_len: usize) {
+    if id_ptr.is_null() || id_len == 0 {
+        return;
+    }
+    let id = unsafe {
+        let bytes = std::slice::from_raw_parts(id_ptr, id_len);
+        String::from_utf8_lossy(bytes).into_owned()
+    };
+    register(&id, widget_handle);
+}
+
+/// Cross-platform setText handler. Issue #535 Layer 1.
+pub extern "C" fn set_text_handler(
+    id_ptr: *const u8,
+    id_len: usize,
+    val_ptr: *const u8,
+    val_len: usize,
+) {
+    if id_ptr.is_null() || id_len == 0 {
+        return;
+    }
+    let id = unsafe {
+        let bytes = std::slice::from_raw_parts(id_ptr, id_len);
+        String::from_utf8_lossy(bytes).into_owned()
+    };
+    let val = if val_ptr.is_null() {
+        String::new()
+    } else {
+        unsafe {
+            let bytes = std::slice::from_raw_parts(val_ptr, val_len);
+            String::from_utf8_lossy(bytes).into_owned()
+        }
+    };
+    set_text_for_id(&id, &val);
+}

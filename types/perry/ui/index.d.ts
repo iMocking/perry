@@ -224,10 +224,11 @@ export function Button(label: string, onPress: () => void): Widget;
 /**
  * Update a reactive `Text(initial, id)` widget's content.
  *
- * On `--target harmonyos`, queues a `(id, value)` update that the
- * auto-emitted .ets onClick drains after the closure returns,
- * assigning to the matching `@State text_<id>: string` field — ArkUI
- * rerenders the Text. On other platforms this is currently a no-op.
+ * Routes through the cross-platform setText handler registry on every
+ * UI backend (macOS/iOS/tvOS/visionOS/watchOS/Android/GTK4/Windows);
+ * on `--target harmonyos`, queues a `(id, value)` update that the
+ * auto-emitted .ets onClick drains after the closure returns, assigning
+ * to the matching `@State text_<id>: string` field — ArkUI rerenders.
  *
  * `id` must match exactly what was passed as the second arg to the
  * `Text()` call you want to update. Calls to `setText` for unregistered
@@ -242,12 +243,21 @@ export function setText(id: string, value: string): void;
  * - `set(v)` — update the value and trigger any bound UI to rerender
  * - `text()` — return a reactive `Text` widget bound to this state
  *
- * Phase 2 v6 implementation desugars to the existing v3.2 setText/Text
- * reactive binding at compile time (perry-codegen-arkts) — each
- * `state(initial)` declaration registers a synthetic id; `state.text()`
- * emits a reactive `Text(initial.toString(), "<synth_id>")`, and
- * `state.set(v)` rewrites to `setText("<synth_id>", String(v))` inside
- * any closure body. No runtime FFIs change vs v3.2.
+ * Implementation desugars to the existing setText/Text reactive binding
+ * at compile time — each `state(initial)` declaration registers a
+ * synthetic id; `state.text()` emits a reactive
+ * `Text(initial.toString(), "<synth_id>")`, and `state.set(v)` rewrites
+ * to `setText("<synth_id>", String(v))` inside any closure body. On
+ * `--target harmonyos`, perry-codegen-arkts owns the harvest; on every
+ * other native target (macOS/iOS/tvOS/visionOS/watchOS/Android/GTK4/
+ * Windows) the target-agnostic `state_desugar` HIR pass produces the
+ * same shape and `js_state_init` / `js_state_get` / `js_state_set`
+ * drive the bound widget through the registered set-text handler.
+ *
+ * The state value also drives `NavStack(state, routes)` visibility:
+ * `state.set("detail")` flips the visible route on every backend that
+ * registers `js_register_widget_hidden_handler` (currently all native
+ * UI backends).
  *
  * Example:
  *
@@ -260,9 +270,13 @@ export function setText(id: string, value: string): void;
  *       Button("+", () => count.set(count.get() + 1)),
  *     ])});
  *
- * Cross-platform: harvest detection only fires on `--target harmonyos`
- * today. On other platforms the runtime side is a plain holder object —
- * `set()` updates the value but no UI binding fires (deferred to v6.5).
+ * Limitations of the desugar pass: only top-level `state(...)`
+ * declarations are tracked; only the canonical method-call shapes
+ * (`x.set` / `x.get` / `x.value` / `x.text`) are rewritten. State
+ * escaping through a function arg / array / object property won't
+ * trigger UI updates at the escape site. `Text("prefix " + s.get())`
+ * snapshots once at App-build time — use `s.text()` (or assemble a
+ * derived string in `s.set` callers) for reactive concatenation.
  */
 export interface State<T> {
     readonly value: T;
