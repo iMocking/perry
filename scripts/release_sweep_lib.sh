@@ -178,6 +178,47 @@ sweep_json_escape() {
     printf '%s' "$s"
 }
 
+# sweep_tier_run_summary <output_dir> <tier_id> <name> <command...>
+# Convenience wrapper for tiers that delegate to a patched test script
+# (run_parity_tests.sh, run_thread_tests.sh, etc.). Sets
+# PERRY_TEST_SUMMARY_OUT to a per-tier summary.json, runs the command with
+# stdout/stderr captured to <name>.log, then reads passed/failed/skipped
+# back out of the summary and emits the final tier result.
+#
+# Called by the wired tier scripts; the caller is responsible for the
+# host-gate check (the orchestrator already SKIPs out-of-scope tiers
+# before invoking the tier script at all).
+sweep_tier_run_summary() {
+    local out="$1"; shift
+    local id="$1"; shift
+    local name="$1"; shift
+    local d log summary start end dur rc passed failed skipped msg
+    d="$(sweep_tier_dir "$out" "$id")"
+    log="$d/${name}.log"
+    summary="$d/summary.json"
+    start="$(date +%s)"
+    PERRY_TEST_SUMMARY_OUT="$summary" "$@" > "$log" 2>&1
+    rc="$?"
+    end="$(date +%s)"
+    dur="$((end - start))"
+    if [[ -f "$summary" ]]; then
+        passed="$(sed -nE 's/.*"passed"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$summary" | head -n1)"
+        failed="$(sed -nE 's/.*"failed"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$summary" | head -n1)"
+        skipped="$(sed -nE 's/.*"skipped"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$summary" | head -n1)"
+        msg="${passed:-?} passed / ${failed:-?} failed"
+        if [[ -n "$skipped" && "$skipped" != "0" ]]; then
+            msg="$msg / $skipped skipped"
+        fi
+    else
+        msg="no summary file written"
+    fi
+    if [[ "$rc" -eq 0 ]]; then
+        sweep_tier_emit "$out" "$id" "$name" "PASS" "$dur" "$msg"
+    else
+        sweep_tier_emit "$out" "$id" "$name" "FAIL" "$dur" "$msg (exit=$rc)"
+    fi
+}
+
 # sweep_tier_run <output_dir> <tier_id> <name> <gate_csv> <command...>
 # Convenience wrapper: gate-check, log redirection, timing, and emit.
 # The command is executed as-is; non-zero exit → status FAIL.

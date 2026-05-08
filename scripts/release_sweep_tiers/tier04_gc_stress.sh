@@ -1,21 +1,19 @@
 #!/usr/bin/env bash
 # Tier 4 — gc_stress
 #
-# What this should do:
-#   Wrap scripts/run_memory_stability_tests.sh and run it through every GC
-#   mode combo from CLAUDE.md:
-#     - default                     (generational, no evac, no codegen WB)
-#     - PERRY_GEN_GC=0              (full mark-sweep, bisection mode)
-#     - PERRY_GEN_GC_EVACUATE=1     (copying evacuation pass)
-#     - PERRY_WRITE_BARRIERS=1      (codegen-emitted write barriers)
-#     - all-on combo
-#   Asserts each combo passes the existing RSS / correctness gates.
-#
-# Stub for now.
+# Wraps scripts/run_memory_stability_tests.sh. Today's wiring runs the
+# default GC mode (generational, no codegen WB, no evac). The full GC mode
+# matrix from CLAUDE.md (PERRY_GEN_GC=0 / PERRY_GEN_GC_EVACUATE=1 /
+# PERRY_WRITE_BARRIERS=1) is a follow-on enhancement: the underlying script
+# already loops modes internally, but this tier wrapper currently only
+# captures the aggregate pass/fail count. Per-mode breakout will land when
+# the script gains a JSON-array summary (single PERRY_TEST_SUMMARY_OUT
+# entry per mode would be a richer shape — left for a later iteration).
 
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/../release_sweep_lib.sh"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 OUT="${PERRY_RELEASE_SWEEP_OUTPUT:?PERRY_RELEASE_SWEEP_OUTPUT not set}"
-sweep_tier_emit "$OUT" 4 "gc_stress" "NOT_IMPLEMENTED" 0 "stub — extends run_memory_stability_tests.sh matrix in step 2"
+sweep_tier_run_summary "$OUT" 4 "gc_stress" "$REPO_ROOT/scripts/run_memory_stability_tests.sh"

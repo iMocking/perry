@@ -1,15 +1,13 @@
 #!/usr/bin/env bash
 # Tier 5 — threading
 #
-# What this should do:
-#   Wrap scripts/run_thread_tests.sh. Once step 2 adds the JSON summary, the
-#   tier reads that and emits PASS / FAIL with per-test breakdown.
-#
-# Stub for now.
+# Wraps scripts/run_thread_tests.sh. The script exercises the perry/thread
+# borrow/aliasing rules and parallelMap/parallelFilter happy paths.
 
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/../release_sweep_lib.sh"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 OUT="${PERRY_RELEASE_SWEEP_OUTPUT:?PERRY_RELEASE_SWEEP_OUTPUT not set}"
-sweep_tier_emit "$OUT" 5 "threading" "NOT_IMPLEMENTED" 0 "stub — wraps run_thread_tests.sh in step 2"
+sweep_tier_run_summary "$OUT" 5 "threading" "$REPO_ROOT/scripts/run_thread_tests.sh"
