@@ -42,6 +42,28 @@ pub(super) fn lower_builtin_new(
         // RegExp LITERALS (`/foo/g`) already lower through Expr::RegExp
         // at expr.rs:4964 — this arm covers the runtime `new RegExp(arg)`
         // form where the pattern argument is a non-literal expression.
+        // `new ArrayBuffer(size)` — issue #579. Pre-fix this fell through
+        // to the empty-ObjectHeader placeholder and `new Uint8Array(ab)`
+        // views silently allocated independent storage (no aliasing). The
+        // runtime's `js_array_buffer_new` allocates a real BufferHeader
+        // that subsequent Uint8Array views share by pointer (see
+        // `js_uint8array_new` in `crates/perry-runtime/src/buffer.rs`:
+        // sources that ARE registered buffers but NOT marked as
+        // Uint8Array — i.e. ArrayBuffers — are aliased rather than
+        // copied). Non-numeric arg shapes (`new ArrayBuffer(undefined)`
+        // etc.) coerce to 0 — matches Node/bun's `ToIndex(length)` step
+        // for the typical undefined-arg case.
+        "ArrayBuffer" => {
+            let size_box = if !args.is_empty() {
+                lower_expr(ctx, &args[0])?
+            } else {
+                double_literal(0.0)
+            };
+            let blk = ctx.block();
+            let size_i32 = blk.fptosi(DOUBLE, &size_box, I32);
+            let handle = blk.call(I64, "js_array_buffer_new", &[(I32, &size_i32)]);
+            Ok(Some(nanbox_pointer_inline(blk, &handle)))
+        }
         "RegExp" => {
             let pattern_box = if !args.is_empty() {
                 lower_expr(ctx, &args[0])?

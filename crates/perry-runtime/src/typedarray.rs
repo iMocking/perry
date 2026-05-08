@@ -451,6 +451,35 @@ pub extern "C" fn js_typed_array_set(ta: *mut TypedArrayHeader, index: i32, valu
     }
 }
 
+/// Materialize a typed array as a regular Array of f64s. Each element is
+/// loaded via the per-kind accessor (`load_at`) so `Uint8Array([10,20,30,40])`
+/// becomes `Array[10.0, 20.0, 30.0, 40.0]` rather than four raw NaN-box-bit
+/// reinterpretations of the byte buffer. Issue #578.
+///
+/// Used by `js_array_clone` (Array.from / for-of materialize), `js_array_concat`
+/// (`[...typedArray]` spread + `concat`), and any other path that bridges
+/// from typed-array storage into a normal Array.
+pub fn typed_array_to_array(ta: *const TypedArrayHeader) -> *mut crate::array::ArrayHeader {
+    let ta = clean_ta_ptr(ta);
+    if ta.is_null() {
+        return crate::array::js_array_alloc(0);
+    }
+    unsafe {
+        let len = (*ta).length as usize;
+        let result = crate::array::js_array_alloc(len as u32);
+        if len == 0 {
+            return result;
+        }
+        let dst = (result as *mut u8).add(std::mem::size_of::<crate::array::ArrayHeader>())
+            as *mut f64;
+        for i in 0..len {
+            *dst.add(i) = load_at(ta, i);
+        }
+        (*result).length = len as u32;
+        result
+    }
+}
+
 /// `ta.toReversed()` — new typed array of same kind with reversed elements.
 #[no_mangle]
 pub extern "C" fn js_typed_array_to_reversed(ta: *const TypedArrayHeader) -> *mut TypedArrayHeader {

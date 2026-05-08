@@ -37,6 +37,23 @@ thread_local! {
     /// Buffers that were specifically created via `new Uint8Array(...)` —
     /// formatted as `Uint8Array(N) [ a, b, c ]` instead of `<Buffer aa bb cc>`.
     static UINT8ARRAY_FROM_CTOR: RefCell<PtrHashSet<usize>> = RefCell::new(new_ptr_hash_set());
+    /// Issue #579: buffers allocated as `new ArrayBuffer(n)` — sources that
+    /// `new Uint8Array(ab)` should ALIAS rather than copy. Survives across
+    /// `mark_as_uint8array` calls so a second view of the same ArrayBuffer
+    /// still aliases (without a separate registry, the first view's mark
+    /// would make the second `js_uint8array_new` call mistake the source
+    /// for a Uint8Array and fall into the spec-mandated COPY branch).
+    static ARRAY_BUFFER_REGISTRY: RefCell<PtrHashSet<usize>> = RefCell::new(new_ptr_hash_set());
+}
+
+pub fn mark_as_array_buffer(addr: usize) {
+    ARRAY_BUFFER_REGISTRY.with(|r| {
+        r.borrow_mut().insert(addr);
+    });
+}
+
+pub fn is_array_buffer(addr: usize) -> bool {
+    ARRAY_BUFFER_REGISTRY.with(|r| r.borrow().contains(&addr))
 }
 
 /// Register a buffer pointer in the thread-local registry
@@ -400,12 +417,24 @@ pub extern "C" fn js_uint8array_new(val: f64) -> *mut BufferHeader {
     // POINTER_TAG (0x7FFD) — an object/array/buffer pointer.
     if top16 == 0x7FFD {
         let raw = (bits & 0x0000_FFFF_FFFF_FFFF) as usize;
-        // If the source is itself a Buffer / ArrayBuffer / Uint8Array, memcpy
-        // its bytes directly. Without this branch the catch-all would treat
-        // the BufferHeader as an ArrayHeader of f64s and produce garbage —
-        // notably breaks `new Uint8Array(await response.arrayBuffer())` since
-        // `js_response_array_buffer` returns a real BufferHeader (issue #227).
         if is_registered_buffer(raw) {
+            // Issue #579: ArrayBuffer source aliases the storage — every
+            // `new Uint8Array(ab)` view of the same ArrayBuffer shares the
+            // same `BufferHeader` pointer so writes through one view are
+            // visible through every other. The decision is gated on the
+            // ArrayBuffer registry (set at `js_array_buffer_new` time) so
+            // it survives the `mark_as_uint8array` side-effect — a second
+            // view's `is_uint8array_buffer` would otherwise return true
+            // and incorrectly fall into the spec-mandated COPY branch.
+            //
+            // Issue #227 (the prior memcpy branch) was about avoiding
+            // f64-misinterpretation; aliasing also avoids it.
+            if is_array_buffer(raw) {
+                mark_as_uint8array(raw);
+                return raw as *mut BufferHeader;
+            }
+            // Source is itself a Uint8Array → ECMAScript spec copies the
+            // bytes into a fresh storage region.
             let src = raw as *const BufferHeader;
             unsafe {
                 let len = (*src).length;
@@ -433,6 +462,34 @@ pub extern "C" fn js_uint8array_new(val: f64) -> *mut BufferHeader {
     // Any other tag (undefined/null/bool/string/bigint) → empty buffer,
     // matching the JS semantics of `new Uint8Array(undefined)` et al.
     js_uint8array_alloc(0)
+}
+
+/// `new ArrayBuffer(size)` — allocate a zero-filled buffer of `size` bytes.
+/// Issue #579: pre-fix, `ArrayBuffer` had no constructor handler so it fell
+/// through to the empty-ObjectHeader placeholder path, and `new Uint8Array(ab)`
+/// silently produced a 1-byte buffer with no aliasing. The runtime treats
+/// ArrayBuffer and the Uint8Array's storage as the same `BufferHeader`
+/// shape (see comment at `value.rs::js_object_get_field_by_name` —
+/// "Perry doesn't separate ArrayBuffer"); this constructor allocates a
+/// real buffer that subsequent `new Uint8Array(ab)` views can ALIAS by
+/// sharing the same pointer.
+#[no_mangle]
+pub extern "C" fn js_array_buffer_new(size: i32) -> *mut BufferHeader {
+    let size = size.max(0) as u32;
+    let buf = buffer_alloc(size);
+    unsafe {
+        (*buf).length = size;
+        // Zero-fill the data region. `buffer_alloc` does not zero, but
+        // ArrayBuffer per ECMAScript spec must observe zero-initialized
+        // bytes. Small-slab path is bump-allocated and may carry stale
+        // bytes from a prior allocation.
+        if size > 0 {
+            let data = buffer_data_mut(buf);
+            ptr::write_bytes(data, 0, size as usize);
+        }
+    }
+    mark_as_array_buffer(buf as usize);
+    buf
 }
 
 /// Allocate a zero-filled buffer
@@ -745,6 +802,39 @@ pub extern "C" fn js_buffer_length(buf_ptr: *const BufferHeader) -> i32 {
         return 0;
     }
     unsafe { (*buf_ptr).length as i32 }
+}
+
+/// Materialize a buffer (Uint8Array) as a regular Array of f64 byte values.
+/// Used by `js_array_clone` / `js_array_concat` to give `Array.from(uint8arr)`,
+/// `[...uint8arr]`, and the for-of `ArrayFrom`-wrapped iterable the byte
+/// values rather than the byte buffer reinterpreted as f64s. Issue #578.
+pub fn buffer_to_array(buf_ptr: *const BufferHeader) -> *mut ArrayHeader {
+    // Strip NaN-box if present.
+    let buf_ptr = {
+        let bits = buf_ptr as u64;
+        if (bits >> 48) >= 0x7FF8 {
+            (bits & 0x0000_FFFF_FFFF_FFFF) as *const BufferHeader
+        } else {
+            buf_ptr
+        }
+    };
+    if buf_ptr.is_null() || (buf_ptr as usize) < 0x1000 {
+        return crate::array::js_array_alloc(0);
+    }
+    unsafe {
+        let len = (*buf_ptr).length as usize;
+        let result = crate::array::js_array_alloc(len as u32);
+        if len == 0 {
+            return result;
+        }
+        let src = buffer_data(buf_ptr);
+        let dst = (result as *mut u8).add(std::mem::size_of::<ArrayHeader>()) as *mut f64;
+        for i in 0..len {
+            *dst.add(i) = (*src.add(i)) as f64;
+        }
+        (*result).length = len as u32;
+        result
+    }
 }
 
 /// Get a byte at the specified index

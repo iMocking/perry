@@ -1236,6 +1236,21 @@ pub extern "C" fn js_array_concat(
         let arr = crate::map::js_map_entries(src as *const crate::map::MapHeader);
         return js_array_concat(dest, arr);
     }
+    // Issue #578: typed-array source — materialize through the per-kind
+    // accessor so `[...new Uint8Array([1,2,3])]` and `arr.concat(typedArr)`
+    // see the byte values, not the byte buffer reinterpreted as f64.
+    if crate::typedarray::lookup_typed_array_kind(src as usize).is_some() {
+        let arr = crate::typedarray::typed_array_to_array(
+            src as *const crate::typedarray::TypedArrayHeader,
+        );
+        return js_array_concat(dest, arr);
+    }
+    // Uint8Array (legacy Buffer-backed) source — materialize byte values.
+    if crate::buffer::is_registered_buffer(src as usize) {
+        let arr =
+            crate::buffer::buffer_to_array(src as *const crate::buffer::BufferHeader);
+        return js_array_concat(dest, arr);
+    }
     unsafe {
         let src_len = (*src).length;
         if src_len == 0 {
@@ -1469,6 +1484,32 @@ pub extern "C" fn js_array_clone(src: *const ArrayHeader) -> *mut ArrayHeader {
     // Check if this is a Map (for Array.from(map) → array of [key, value] pairs)
     if !src.is_null() && crate::map::is_registered_map(src as usize) {
         return crate::map::js_map_entries(src as *const crate::map::MapHeader);
+    }
+    // Issue #578: typed array source — materialize each element through the
+    // per-kind accessor instead of memcpy'ing the byte-packed storage as if
+    // it were a flat f64 array. Without this, `Array.from(uint8array)` /
+    // `[...uint8array]` / `for (const b of uint8array)` (which now wraps
+    // the iterable in `Expr::ArrayFrom`) all produced raw bit reinterpretations
+    // of the underlying bytes rather than the byte values themselves.
+    // Strip NaN-box first so the registry lookup sees the real address.
+    if !src.is_null() {
+        let bits = src as u64;
+        let raw_addr = if (bits >> 48) >= 0x7FF8 {
+            (bits & 0x0000_FFFF_FFFF_FFFF) as usize
+        } else {
+            bits as usize
+        };
+        if crate::typedarray::lookup_typed_array_kind(raw_addr).is_some() {
+            return crate::typedarray::typed_array_to_array(
+                raw_addr as *const crate::typedarray::TypedArrayHeader,
+            );
+        }
+        // Uint8Array (legacy Buffer-backed): same materialization story.
+        if crate::buffer::is_registered_buffer(raw_addr) {
+            return crate::buffer::buffer_to_array(
+                raw_addr as *const crate::buffer::BufferHeader,
+            );
+        }
     }
     let src = clean_arr_ptr(src);
     if src.is_null() {

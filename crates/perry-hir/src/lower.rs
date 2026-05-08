@@ -6162,6 +6162,22 @@ fn lower_stmt(ctx: &mut LoweringContext, module: &mut Module, stmt: &ast::Stmt) 
             } else {
                 None
             };
+            // Issue #578: typed-array iterables. Wrap in `Expr::ArrayFrom`
+            // so the holder is a regular Array of materialized element values.
+            // Without this, the generated `for (let i=0; i<__arr.length; ++i)
+            // __item = __arr[i]` loop reads f64s straight off the typed
+            // array's byte-packed storage and yields raw bit reinterpretations.
+            // `js_array_clone` (the runtime backing of `ArrayFrom`) detects the
+            // typed-array tag and materializes through the per-kind accessor.
+            let is_iterable_typed_array = matches!(
+                &iterable_type,
+                Some(Type::Named(name)) if matches!(name.as_str(),
+                    "Uint8Array" | "Int8Array" | "Uint8ClampedArray"
+                    | "Uint16Array" | "Int16Array"
+                    | "Uint32Array" | "Int32Array"
+                    | "Float32Array" | "Float64Array"
+                )
+            );
             let arr_expr = if is_iterable_map {
                 if let Some(args) = map_type_args.as_ref() {
                     if args.len() >= 2 {
@@ -6180,6 +6196,8 @@ fn lower_stmt(ctx: &mut LoweringContext, module: &mut Module, stmt: &ast::Stmt) 
                 } else {
                     Expr::SetValues(Box::new(arr_expr))
                 }
+            } else if is_iterable_typed_array {
+                Expr::ArrayFrom(Box::new(arr_expr))
             } else {
                 arr_expr
             };
@@ -6196,6 +6214,9 @@ fn lower_stmt(ctx: &mut LoweringContext, module: &mut Module, stmt: &ast::Stmt) 
                 Type::String
             } else if let (Some(ref k), Some(ref v)) = (&map_key_type, &map_val_type) {
                 Type::Tuple(vec![k.clone(), v.clone()])
+            } else if is_iterable_typed_array {
+                // Issue #578: typed-array element values are always Number.
+                Type::Number
             } else {
                 match &iterable_type {
                     Some(Type::Array(elem)) => (**elem).clone(),

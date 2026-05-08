@@ -4327,6 +4327,19 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
             // Issue #542/#543: handle `Map | undefined` / `Set | undefined`
             // shapes via the same `is_iterable_map` / `is_iterable_set` flags
             // (which now Union-aware) instead of a fresh narrow match here.
+            // Issue #578: typed-array iterables in function-body for-of.
+            // Same materialization fix as the module-init lowering path —
+            // wrap in `Expr::ArrayFrom` so iteration sees the byte values
+            // not the byte buffer reinterpreted as f64s.
+            let is_iterable_typed_array = matches!(
+                &iterable_type,
+                Some(Type::Named(name)) if matches!(name.as_str(),
+                    "Uint8Array" | "Int8Array" | "Uint8ClampedArray"
+                    | "Uint16Array" | "Int16Array"
+                    | "Uint32Array" | "Int32Array"
+                    | "Float32Array" | "Float64Array"
+                )
+            );
             let arr_expr = if is_iterable_map {
                 if map_kv_fastpath {
                     arr_expr
@@ -4339,6 +4352,8 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
                 } else {
                     Expr::SetValues(Box::new(arr_expr))
                 }
+            } else if is_iterable_typed_array {
+                Expr::ArrayFrom(Box::new(arr_expr))
             } else {
                 arr_expr
             };
@@ -4410,6 +4425,9 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
             };
             let item_hir_type = if is_string_iter {
                 Type::String
+            } else if is_iterable_typed_array {
+                // Issue #578: typed-array element values are always Number.
+                Type::Number
             } else if let Some(elem) = inferred_elem_type {
                 elem
             } else {
