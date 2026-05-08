@@ -478,6 +478,14 @@ cp "$REPORT_FILE" "$LATEST_REPORT"
 echo "Report saved to: $REPORT_FILE"
 echo ""
 
+# release_sweep.sh consumes a flat single-line summary if PERRY_TEST_SUMMARY_OUT
+# is exported. Standalone runs (env var unset) are unaffected.
+if [[ -n "${PERRY_TEST_SUMMARY_OUT:-}" ]]; then
+    cat > "$PERRY_TEST_SUMMARY_OUT" <<EOF
+{"script": "run_parity_tests.sh", "passed": $PARITY_PASS, "failed": $((PARITY_FAIL + COMPILE_FAIL)), "skipped": $SKIPPED, "total": $TOTAL_RUN, "rate_pct": $PARITY_PCT}
+EOF
+fi
+
 # Exit with error if parity is below threshold (80%)
 if (( $(echo "$PARITY_PCT < 80" | bc -l) )); then
     echo -e "${RED}Parity below 80% threshold${NC}"

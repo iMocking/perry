@@ -21,6 +21,24 @@ mkdir -p "$REPORT_DIR"
 REPORT_JSON="$REPORT_DIR/latest.json"
 
 # Forward any extra args through to the harness (e.g. --filter, --verbose).
-exec cargo run --release --quiet -p perry-doc-tests -- \
+# Was `exec cargo run ...` originally; now run as a subprocess so we can
+# emit a flat summary for release_sweep.sh after the harness exits. The
+# behavior of standalone runs is otherwise unchanged.
+cargo run --release --quiet -p perry-doc-tests -- \
     --json "$REPORT_JSON" \
     "$@"
+rc=$?
+
+if [[ -n "${PERRY_TEST_SUMMARY_OUT:-}" ]] && [[ -f "$REPORT_JSON" ]]; then
+    # Best-effort field extraction from the rust harness's pretty-printed
+    # JSON. perry-doc-tests writes top-level "passed"/"failed"/"skipped"
+    # fields (see crates/perry-doc-tests/src/main.rs).
+    passed="$(sed -nE 's/.*"passed"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$REPORT_JSON" | head -n1)"
+    failed="$(sed -nE 's/.*"failed"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$REPORT_JSON" | head -n1)"
+    skipped="$(sed -nE 's/.*"skipped"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$REPORT_JSON" | head -n1)"
+    cat > "$PERRY_TEST_SUMMARY_OUT" <<EOF
+{"script": "run_doc_tests.sh", "passed": ${passed:-0}, "failed": ${failed:-0}, "skipped": ${skipped:-0}, "exit_code": $rc}
+EOF
+fi
+
+exit "$rc"

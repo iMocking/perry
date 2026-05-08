@@ -134,4 +134,12 @@ check "GET /does-not-exist -> 404" "404" "$code"
 
 echo
 echo "fastify-tests: $pass passed, $fail failed"
+
+# release_sweep.sh hook — see comment in run_parity_tests.sh.
+if [[ -n "${PERRY_TEST_SUMMARY_OUT:-}" ]]; then
+    cat > "$PERRY_TEST_SUMMARY_OUT" <<EOF
+{"script": "run_fastify_tests.sh", "passed": $pass, "failed": $fail, "skipped": 0}
+EOF
+fi
+
 [[ $fail -eq 0 ]]

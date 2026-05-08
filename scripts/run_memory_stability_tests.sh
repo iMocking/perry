@@ -149,6 +149,13 @@ echo "=== Summary ==="
 echo "  PASS: $PASS"
 echo "  FAIL: $FAIL"
 
+# release_sweep.sh hook — see comment in run_parity_tests.sh.
+if [[ -n "${PERRY_TEST_SUMMARY_OUT:-}" ]]; then
+    cat > "$PERRY_TEST_SUMMARY_OUT" <<EOF
+{"script": "run_memory_stability_tests.sh", "passed": $PASS, "failed": $FAIL, "skipped": 0}
+EOF
+fi
+
 if [[ $FAIL -ne 0 ]]; then
     exit 1
 fi

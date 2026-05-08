@@ -214,6 +214,15 @@ if [ "$FAIL" -gt 0 ]; then
     printf '%s\n' "${FAILURES[@]}"
 fi
 
+# release_sweep.sh hook — see comment in run_parity_tests.sh. Step-5 of the
+# rollout will generalize this script to PLATFORM=ios|tvos|visionos and the
+# summary will gain a per-platform breakdown; for now it's iOS-only.
+if [ -n "${PERRY_TEST_SUMMARY_OUT:-}" ]; then
+    cat > "$PERRY_TEST_SUMMARY_OUT" <<EOF
+{"script": "run_simctl_tests.sh", "passed": $PASS, "failed": $FAIL, "skipped": 0, "total": $TOTAL, "platform": "ios"}
+EOF
+fi
+
 if [ "${KEEP_BOOTED:-0}" != "1" ]; then
     xcrun simctl shutdown "$UDID" || true
 fi
