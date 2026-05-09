@@ -805,6 +805,14 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
         VOID,
         &[I32, DOUBLE, DOUBLE],
     );
+    // v0.5.747: register a string-named static field on a class so reads
+    // via the runtime dynamic-dispatch path (when the class ref is in an
+    // Any-typed local) find the value. Refs #420 / #618 followup.
+    module.declare_function(
+        "js_class_register_static_field",
+        VOID,
+        &[I32, PTR, I64, DOUBLE],
+    );
     module.declare_function(
         "js_object_define_property",
         DOUBLE,

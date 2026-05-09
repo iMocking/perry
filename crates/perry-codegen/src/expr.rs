@@ -3648,25 +3648,59 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             // handles `.length` directly from the NaN-box length
             // byte and returns `undefined` for other keys).
             let is_sso = ctx.block().icmp_eq(I64, &obj_tag, "32761"); // 0x7FF9
+            // v0.5.747: INT32-tagged class refs (top16 == 0x7FFE) used
+            // as PropertyGet receivers. Pre-fix these fell through to
+            // the invalid-recv path (returning undefined) because the
+            // 0xFFFD-masked tag check (0x7FFE & 0xFFFD = 0x7FFC, not
+            // 0x7FFD) treated them as non-pointer values. Drizzle's
+            // `is(value, type)` chain depends on `Cls.kind` reads through
+            // an Any-typed local. Refs #420 / #618 followup.
+            //
+            // Note: this also catches plain int32 numeric values (e.g.
+            // `(42).property`). The runtime helper's INT32-tag arm at
+            // js_object_get_field_by_name returns undefined for any
+            // class_id not registered in CLASS_DYNAMIC_PROPS, matching
+            // the previous behavior — pure ints have no static fields.
+            let is_int32_class = ctx.block().icmp_eq(I64, &obj_tag, "32766"); // 0x7FFE
             let obj_tag_masked = ctx.block().and(I64, &obj_tag, "65533"); // 0xFFFD
             let is_valid = ctx.block().icmp_eq(I64, &obj_tag_masked, "32765"); // 0x7FFD
             let sso_idx = ctx.new_block("pget.recv_sso");
             let pic_idx = ctx.new_block("pget.recv_ok");
             let invalid_idx = ctx.new_block("pget.recv_bad");
+            let class_ref_idx = ctx.new_block("pget.recv_class_ref");
             let final_merge_idx = ctx.new_block("pget.recv_merge");
             let sso_label = ctx.block_label(sso_idx);
             let pic_label = ctx.block_label(pic_idx);
             let invalid_label = ctx.block_label(invalid_idx);
+            let class_ref_label = ctx.block_label(class_ref_idx);
             let final_merge_label = ctx.block_label(final_merge_idx);
-            // Two-step branch: first check SSO, then check
-            // pointer-validity. Both inverse branches land on
-            // `invalid_idx` except when we dispatch through SSO.
+            // Three-step branch: first check SSO, then class-ref, then
+            // pointer-validity. Inverse branches funnel into invalid_idx.
             let pic_or_invalid_idx = ctx.new_block("pget.check_ptr");
             let pic_or_invalid_label = ctx.block_label(pic_or_invalid_idx);
+            let check_class_ref_idx = ctx.new_block("pget.check_class_ref");
+            let check_class_ref_label = ctx.block_label(check_class_ref_idx);
             ctx.block()
-                .cond_br(&is_sso, &sso_label, &pic_or_invalid_label);
+                .cond_br(&is_sso, &sso_label, &check_class_ref_label);
+            ctx.current_block = check_class_ref_idx;
+            ctx.block()
+                .cond_br(&is_int32_class, &class_ref_label, &pic_or_invalid_label);
             ctx.current_block = pic_or_invalid_idx;
             ctx.block().cond_br(&is_valid, &pic_label, &invalid_label);
+
+            // Class-ref dispatch: route through the runtime helper which
+            // detects INT32 class-ref bits and consults CLASS_DYNAMIC_PROPS
+            // for the static field / dynamic IIFE-set property / synthetic
+            // `constructor` lookup. Pass full obj_bits (NOT obj_handle —
+            // the runtime needs the unmasked top16 to detect the tag).
+            ctx.current_block = class_ref_idx;
+            let class_ref_result = ctx.block().call(
+                DOUBLE,
+                "js_object_get_field_by_name_f64",
+                &[(I64, &obj_bits), (I64, &key_handle)],
+            );
+            let class_ref_end_label = ctx.block().label.clone();
+            ctx.block().br(&final_merge_label);
 
             ctx.current_block = pic_idx;
 
@@ -3914,7 +3948,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             ctx.block().br(&final_merge_label);
 
             // Outer merge joins PIC result + invalid-receiver undefined
-            // + SSO result.
+            // + SSO result + class-ref dispatch result.
             ctx.current_block = final_merge_idx;
             Ok(ctx.block().phi(
                 DOUBLE,
@@ -3922,6 +3956,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     (&pic_val, &pic_end_label),
                     (&undef_val, &invalid_end_label),
                     (&sso_val, &sso_end_label),
+                    (&class_ref_result, &class_ref_end_label),
                 ],
             ))
         }
@@ -9169,6 +9204,26 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             if let Some(global_name) = ctx.static_field_globals.get(&key).cloned() {
                 let g_ref = format!("@{}", global_name);
                 ctx.block().store(DOUBLE, &v, &g_ref);
+            }
+            // v0.5.747: also register the static field in the runtime
+            // CLASS_DYNAMIC_PROPS side-table so dynamic-dispatch reads
+            // (when the class ref is in an Any-typed local) find it.
+            // Refs #420 / #618 followup.
+            if let Some(&class_id) = ctx.class_ids.get(class_name) {
+                let idx = ctx.strings.intern(field_name);
+                let entry = ctx.strings.entry(idx);
+                let bytes_ref = format!("@{}", entry.bytes_global);
+                let len_str = entry.byte_len.to_string();
+                let cid_str = class_id.to_string();
+                ctx.block().call_void(
+                    "js_class_register_static_field",
+                    &[
+                        (crate::types::I32, &cid_str),
+                        (crate::types::PTR, &bytes_ref),
+                        (crate::types::I64, &len_str),
+                        (DOUBLE, &v),
+                    ],
+                );
             }
             Ok(v)
         }

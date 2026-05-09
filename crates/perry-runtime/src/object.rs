@@ -875,6 +875,34 @@ pub unsafe extern "C" fn js_register_class_id(class_id: u32) {
     guard.as_mut().unwrap().insert(class_id);
 }
 
+/// Register a static field value on a class so `Cls.field` (when `Cls` is
+/// accessed via dynamic dispatch — e.g. through an Any-typed local) finds
+/// the value via the runtime path. Codegen calls this at module init for
+/// every static field initializer in addition to writing the value to the
+/// per-field module global. Refs #420 / #618 followup. Static-field values
+/// stored in CLASS_DYNAMIC_PROPS keyed by class_id.
+#[no_mangle]
+pub unsafe extern "C" fn js_class_register_static_field(
+    class_id: u32,
+    name_ptr: *const u8,
+    name_len: usize,
+    value: f64,
+) {
+    if class_id == 0 || name_ptr.is_null() || name_len == 0 {
+        return;
+    }
+    let name = match std::str::from_utf8(std::slice::from_raw_parts(name_ptr, name_len)) {
+        Ok(s) => s.to_string(),
+        Err(_) => return,
+    };
+    CLASS_DYNAMIC_PROPS.with(|m| {
+        m.borrow_mut()
+            .entry(class_id)
+            .or_insert_with(std::collections::HashMap::new)
+            .insert(name, value);
+    });
+}
+
 /// Returns true if `class_id` corresponds to a registered class. Used by
 /// `js_value_typeof` (refs #618 / #420 followup) to distinguish a class
 /// reference (NaN-boxed INT32 with class_id payload) from a regular int32
