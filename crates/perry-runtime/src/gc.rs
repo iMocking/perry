@@ -1344,8 +1344,30 @@ fn gc_collect_inner() -> u64 {
 /// lookup is fast enough that the few thousand stack-scan candidate
 /// validations per GC barely move the total.
 pub(crate) struct ValidPointerSet {
+    // Insertion-side staging: `arena_sorted` is filled in ascending
+    // order by the address-sorted arena walk (already sorted), and
+    // `malloc_sorted` is filled in MallocState insertion order then
+    // sorted in `finalize()`. After `finalize()` both staging vecs are
+    // empty (their contents merged into `merged_sorted` for lookup).
     arena_sorted: Vec<usize>,
     malloc_sorted: Vec<usize>,
+    /// Single sorted vec across both regions, populated in `finalize()`.
+    /// The mark phase's hot `contains` path runs ONE binary search
+    /// instead of two — material on workloads that call `contains`
+    /// millions of times per cycle (recursive search loops with
+    /// many string/array refs on stack).
+    merged_sorted: Vec<usize>,
+    // Min/max heap-pointer range across the merged set. Populated in
+    // `finalize()`. The conservative stack scan calls `contains` once per
+    // 8-byte stack word (~1024 calls per scanned KB of stack) and
+    // `try_mark_value` calls it once per scanned root and once per
+    // traced reference field. Most candidates that pass the NaN-tag
+    // check are real heap pointers and DO fall inside the range,
+    // so the prefilter mostly helps for the raw-pointer fallback path
+    // where stack words may be return addresses / plain ints / spilled
+    // function pointers. Cheap to maintain regardless.
+    range_min: usize,
+    range_max: usize,
 }
 
 impl ValidPointerSet {
@@ -1353,6 +1375,9 @@ impl ValidPointerSet {
         Self {
             arena_sorted: Vec::with_capacity(arena_capacity),
             malloc_sorted: Vec::with_capacity(malloc_capacity),
+            merged_sorted: Vec::new(),
+            range_min: usize::MAX,
+            range_max: 0,
         }
     }
     /// Caller must guarantee that pushes happen in ascending address
@@ -1370,10 +1395,62 @@ impl ValidPointerSet {
         // typically a few thousand entries — fast even with
         // sort_unstable's pdqsort.
         self.malloc_sorted.sort_unstable();
+
+        // Merge the two sorted vecs into one. Each `contains` call in
+        // the mark phase otherwise does TWO binary searches (one per
+        // region); a single merged vec halves that — material on
+        // ABC451D-shaped allocation-heavy workloads where `contains`
+        // is called millions of times per GC cycle. The merge is O(n)
+        // and runs once per cycle (here in finalize); the mark-phase
+        // savings are O(n × log n × calls), so even at million-entry
+        // scale the trade favors the merged layout.
+        if self.arena_sorted.is_empty() {
+            std::mem::swap(&mut self.merged_sorted, &mut self.malloc_sorted);
+        } else if self.malloc_sorted.is_empty() {
+            std::mem::swap(&mut self.merged_sorted, &mut self.arena_sorted);
+        } else {
+            self.merged_sorted
+                .reserve(self.arena_sorted.len() + self.malloc_sorted.len());
+            let (mut i, mut j) = (0usize, 0usize);
+            let (a, m) = (&self.arena_sorted, &self.malloc_sorted);
+            while i < a.len() && j < m.len() {
+                if a[i] <= m[j] {
+                    self.merged_sorted.push(a[i]);
+                    i += 1;
+                } else {
+                    self.merged_sorted.push(m[j]);
+                    j += 1;
+                }
+            }
+            self.merged_sorted.extend_from_slice(&a[i..]);
+            self.merged_sorted.extend_from_slice(&m[j..]);
+        }
+
+        // Compute the min/max range from the merged vec (sorted, so
+        // first/last are the extremes). Empty regions leave the
+        // sentinel values, which the `maybe_contains` short-circuit
+        // handles via `if ptr < min || ptr > max` — both extremes will
+        // exclude every input.
+        if let (Some(&first), Some(&last)) =
+            (self.merged_sorted.first(), self.merged_sorted.last())
+        {
+            self.range_min = first;
+            self.range_max = last;
+        }
+    }
+    /// Cheap O(1) range-rejection prefilter. Most stack words and
+    /// register spills are not heap pointers; if the candidate falls
+    /// outside `[range_min, range_max]` it cannot match either region
+    /// and we skip the binary search.
+    #[inline(always)]
+    pub(crate) fn maybe_contains(&self, ptr: usize) -> bool {
+        ptr >= self.range_min && ptr <= self.range_max
     }
     pub(crate) fn contains(&self, ptr: &usize) -> bool {
-        self.arena_sorted.binary_search(ptr).is_ok()
-            || self.malloc_sorted.binary_search(ptr).is_ok()
+        if !self.maybe_contains(*ptr) {
+            return false;
+        }
+        self.merged_sorted.binary_search(ptr).is_ok()
     }
 
     /// Issue #73: interior-pointer lookup. Given a scanned word, find
@@ -1383,19 +1460,10 @@ impl ValidPointerSet {
     /// interior pointer while calling into user code. The conservative
     /// scan would otherwise see `arr + 8`, miss it (it's not at an
     /// object start), and let the GC sweep the backing object mid-
-    /// iteration. With two regions we find the largest entry `<= query`
-    /// in each, pick the larger of the two candidates, then validate
-    /// via the GcHeader's size field.
+    /// iteration. Find the largest entry `<= query`, then validate via
+    /// the GcHeader's size field.
     pub(crate) fn enclosing_object(&self, ptr: usize) -> Option<usize> {
-        let arena_cand = Self::find_floor(&self.arena_sorted, ptr);
-        let malloc_cand = Self::find_floor(&self.malloc_sorted, ptr);
-        let candidate = match (arena_cand, malloc_cand) {
-            (None, None) => return None,
-            (Some(a), None) => a,
-            (None, Some(m)) => m,
-            // The closest <= ptr is the larger of the two candidates.
-            (Some(a), Some(m)) => a.max(m),
-        };
+        let candidate = Self::find_floor(&self.merged_sorted, ptr)?;
         unsafe {
             let header = (candidate as *const u8).sub(GC_HEADER_SIZE) as *const GcHeader;
             let total = (*header).size as usize;
@@ -1500,19 +1568,29 @@ fn clear_mark_seeds() {
     });
 }
 
+#[inline]
 fn try_mark_value(value_bits: u64, valid_ptrs: &ValidPointerSet) -> bool {
     let tag = value_bits & TAG_MASK;
+    // Hot-path tag rejection. POINTER_TAG / STRING_TAG / BIGINT_TAG are
+    // the only NaN-tags that wrap a heap pointer; everything else
+    // (UNDEFINED, NULL, FALSE, TRUE, INT32, SHORT_STRING, plain f64s,
+    // raw integers) is rejected with a single non-equality cascade
+    // that LLVM lowers to a switch.
+    let is_heap_ptr = tag == POINTER_TAG || tag == STRING_TAG || tag == BIGINT_TAG;
+    if !is_heap_ptr {
+        return false;
+    }
     let ptr_val = (value_bits & POINTER_MASK) as usize;
+    if ptr_val == 0 {
+        return false;
+    }
 
-    // Check if this is a tagged pointer
-    let is_heap_ptr = match tag {
-        t if t == POINTER_TAG => true,
-        t if t == STRING_TAG => true,
-        t if t == BIGINT_TAG => true,
-        _ => false,
-    };
-
-    if !is_heap_ptr || ptr_val == 0 {
+    // Range short-circuit before paying for the binary search. Most
+    // calls reject here on miss-prone inputs (e.g. NaN-boxed pointers
+    // from objects allocated by previous test runs in the same process,
+    // dead-store stack words pointing at freed regions). Saves ~2×
+    // O(log n) per non-matching candidate.
+    if !valid_ptrs.maybe_contains(ptr_val) {
         return false;
     }
 
@@ -1669,6 +1747,24 @@ fn try_mark_value_or_raw(word: u64, valid_ptrs: &ValidPointerSet) -> bool {
         return false; // Too small (null/invalid) or has upper bits set (NaN tag or non-address)
     }
     let raw_ptr = raw_ptr_u64 as usize;
+    // Heap-range short-circuit: every valid raw heap pointer (object
+    // start OR interior) must lie within [range_min, range_max + max
+    // object size]. The interior-pointer case can land up to one
+    // object-size past `range_max`, so we widen the upper bound by
+    // an absolute slack to keep `enclosing_object` reachable for the
+    // few real interior pointers that exist (`js_array_reduce`'s
+    // `elements_ptr = arr + 8` shape, etc.). The slack is bounded by
+    // the largest GcHeader.size field actually used — Perry's biggest
+    // legitimate single allocation is a class instance with many
+    // string fields, well under 4 KB. Anything larger came from a
+    // pinned arena object (rare; doesn't reach this path) so 1 MB
+    // gives plenty of headroom while still rejecting the typical
+    // mis-tagged stack word.
+    if !valid_ptrs.maybe_contains(raw_ptr)
+        && raw_ptr.saturating_sub(0x10_0000) > valid_ptrs.range_max
+    {
+        return false;
+    }
     // Try direct match first (pointer to object start).
     let target = if valid_ptrs.contains(&raw_ptr) {
         raw_ptr
