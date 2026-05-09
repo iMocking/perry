@@ -216,8 +216,6 @@ pub unsafe extern "C" fn js_node_http_server_listen(
         }
     }
 
-    eprintln!("[node:http] listening on http://{}:{}", host, port);
-
     // Main-thread event loop — drain requests + dispatch handler.
     event_loop(server_handle);
 }

@@ -258,8 +258,6 @@ pub unsafe extern "C" fn js_node_https_server_listen(
         }
     }
 
-    eprintln!("[node:https] listening on https://{}:{}", host, port);
-
     // Reuse the HTTP/1.1 event loop — both server flavors push into
     // identical `HttpPendingRequest`s, so the dispatch path is shared.
     https_event_loop(server_handle);

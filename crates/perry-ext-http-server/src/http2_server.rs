@@ -251,8 +251,6 @@ pub unsafe extern "C" fn js_node_http2_server_listen(
         }
     }
 
-    eprintln!("[node:http2] listening on https://{}:{}", host, port);
-
     h2_event_loop(server_handle);
 }
 
