@@ -3535,7 +3535,24 @@ pub(crate) fn lower_new(ctx: &mut FnCtx<'_>, class_name: &str, args: &[Expr]) ->
     // SQLiteInteger ← SQLiteBaseInteger ← SQLiteColumn ← Column chain,
     // SQLiteBaseInteger's `autoIncrement = this.config.autoIncrement`
     // must run AFTER Column's body sets `this.config`.
-    if !has_own_ctor && has_extends {
+    // v0.5.755: don't re-apply field initializers if the cross-module
+    // imported constructor already ran them inside its body (via the
+    // SuperCall + apply_field_initializers chain at the source-module
+    // codegen). The previous check `!has_own_ctor` only saw the LOCAL
+    // class table, so imported classes (whose stub has no constructor
+    // visible) fell through here and overwrote the freshly-set field
+    // values from the imported ctor body with undefined. Drizzle's
+    // BetterSQLiteSession's `this.client = client` after super(dialect)
+    // was the load-bearing site. Refs #420 / #618 followup.
+    let has_imported_ctor_body = ctx
+        .imported_class_ctors
+        .get(class_name)
+        .map(|(_, n)| *n > 0)
+        .unwrap_or(false)
+        || ctx
+            .imported_class_ctors
+            .contains_key(class_name);
+    if !has_own_ctor && has_extends && !has_imported_ctor_body {
         if let Some(stop_at) = inherited_ctor_class {
             apply_field_initializers_recursive(
                 ctx,
