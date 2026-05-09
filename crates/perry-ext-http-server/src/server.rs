@@ -18,7 +18,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 
 use perry_ffi::{
-    alloc_string, get_handle, get_handle_mut, register_handle, JsClosure, JsValue,
+    alloc_string, get_handle, get_handle_mut, iter_handles_of, register_handle, JsClosure,
     RawClosureHeader, StringHeader,
 };
 
@@ -28,10 +28,9 @@ use crate::request::{
 };
 use crate::response::{alloc_server_response, HyperResponseShape, ServerResponse};
 use crate::types::{
-    extract_host, extract_port, js_gc_enter_unsafe_zone, js_gc_exit_unsafe_zone, js_is_promise,
-    js_promise_run_microtasks,
-    js_promise_state, js_promise_value, jsvalue_to_owned_string, read_string_header, wait_for_promise,
-    Promise, POINTER_TAG, PTR_MASK, TAG_NULL, TAG_UNDEFINED,
+    extract_host, extract_port, js_gc_enter_unsafe_zone, js_gc_exit_unsafe_zone,
+    js_promise_run_microtasks, js_promise_state, jsvalue_to_owned_string, read_string_header,
+    Promise, POINTER_TAG, PTR_MASK, TAG_NULL,
 };
 
 /// Backing struct for an `http.Server` JS-side handle.
@@ -216,8 +215,14 @@ pub unsafe extern "C" fn js_node_http_server_listen(
         }
     }
 
-    // Main-thread event loop — drain requests + dispatch handler.
-    event_loop(server_handle);
+    // Closes #604 — `listen()` is now non-blocking. The accept loop is
+    // already spawned on the tokio runtime above, and the new
+    // `js_node_http_server_has_active` / `js_node_http_server_process_pending`
+    // externs let perry-stdlib's main-thread pump drain pending requests
+    // and upgrades each tick. Without this change, `listen()` blocked the
+    // main TS thread inside `event_loop(...)` for the process lifetime,
+    // so `await new Promise(r => server.listen(port, r))` never returned
+    // → no code after `listen()` ever ran (e.g. axios.get + server.close).
 }
 
 /// `server.close(cb?)` — drop the shutdown channel, fire `'close'`.
@@ -241,6 +246,14 @@ pub unsafe extern "C" fn js_node_http_server_close(server_handle: i64, callback:
             let _ = closure.call0();
         }
     }
+    // Closes #604 — match the `js_gc_enter_unsafe_zone` from
+    // `js_node_http_server_listen`. Pre-#604 this exit lived in
+    // `event_loop`'s tail; with `listen()` now non-blocking, it moves
+    // here so the GC stays suppressed for the lifetime of the listening
+    // server but is restored once the user explicitly closes it. If
+    // multiple servers are listening, every close balances one enter
+    // (the runtime's unsafe-zone counter is reentrant).
+    js_gc_exit_unsafe_zone();
 }
 
 /// `server.closeAllConnections()` — placeholder. Active hyper
@@ -482,60 +495,159 @@ async fn handle_websocket_upgrade(
         .unwrap())
 }
 
-/// Main-thread event loop. Drains pending requests + upgrade events
-/// + dispatches to the user handler / `'upgrade'` listener. Never
-/// returns; the process exits when the user invokes `process.exit`
-/// or hits a top-level error.
-fn event_loop(server_handle: i64) {
-    extern "C" {
-        // perry-ext-ws's main-thread pump — drains pending WS
-        // events (message / close / error) and dispatches to user
-        // listeners. Without this call here, WebSocket connections
-        // routed in via the Phase 4 upgrade path queue events
-        // forever and `ws.on('message', ...)` listeners never fire.
-        fn js_ws_process_pending() -> i32;
+// ============================================================================
+// Issue #604 — main-thread pump exposed to perry-stdlib's stdlib pump.
+//
+// Pre-#604, `js_node_http_server_listen` ended in `event_loop(...)` —
+// an infinite blocking loop on the main TS thread that drained pending
+// requests and upgrades synchronously. That blocked `await new
+// Promise(r => server.listen(port, r))` from ever returning, so any
+// code after `listen()` (e.g. `axios.get(...)`, `server.close()`)
+// never ran.
+//
+// Replacement: `listen()` returns immediately after spawning the
+// accept loop on the tokio runtime. The new
+// `js_node_http_server_has_active` and `js_node_http_server_process_pending`
+// externs are wired into perry-stdlib's `js_stdlib_has_active_handles` /
+// `js_stdlib_process_pending` (gated on the `external-http-server-pump`
+// feature). The codegen-emitted main loop calls those each tick, so
+// requests + upgrades are dispatched on the same main thread as
+// before — just driven from the outer event loop instead of an inner
+// blocking one.
+//
+// Both externs walk the global handle registry via `iter_handles_of`
+// (covers HTTP/1, HTTPS, and HTTP/2 — HTTPS / HTTP/2 wrap an
+// `HttpServer` inside their own struct, so checking the standalone
+// HttpServers + the `.base` of the wrappers covers all three).
+// ============================================================================
+
+/// Returns 1 if any registered HTTP/HTTPS/HTTP/2 server is currently
+/// listening, has pending requests, or has pending upgrade events.
+/// Wired into perry-stdlib's `js_stdlib_has_active_handles` via the
+/// `external-http-server-pump` feature. Without this gate, the
+/// codegen-emitted main loop would exit before the accept loop has
+/// a chance to push the first request through the channel.
+#[no_mangle]
+pub extern "C" fn js_node_http_server_has_active() -> i32 {
+    let mut active = 0i32;
+    iter_handles_of::<HttpServer, _>(|s| {
+        if server_is_active(s) {
+            active = 1;
+        }
+    });
+    if active != 0 {
+        return 1;
     }
-    loop {
-        // Issue #604 — `server.close()` flips `listening` to false and
-        // drops the shutdown_tx. Without this gate the main-thread
-        // event_loop spins forever on an infinite `loop {}` even after
-        // close, so a perry-compiled program that does request →
-        // handle → close → exit never reaches the exit. Check the
-        // listening flag at the top of every tick and break out when
-        // close has fired so control returns to the caller of
-        // `js_node_http_server_listen`.
-        let still_listening = get_handle::<HttpServer>(server_handle)
-            .map(|s| s.listening)
-            .unwrap_or(false);
-        if !still_listening {
-            break;
+    iter_handles_of::<crate::https_server::HttpsServer, _>(|s| {
+        if server_is_active(&s.base) {
+            active = 1;
         }
-        unsafe {
-            js_promise_run_microtasks();
-            js_ws_process_pending();
+    });
+    if active != 0 {
+        return 1;
+    }
+    iter_handles_of::<crate::http2_server::Http2SecureServer, _>(|s| {
+        if server_is_active(&s.base) {
+            active = 1;
         }
-        // Drain any ready upgrade events first so they don't get
-        // starved by a busy request stream.
-        while let Some(up) = try_recv_upgrade(server_handle) {
+    });
+    active
+}
+
+/// Drain pending requests + upgrades from every registered server,
+/// dispatching to the user handler / `'upgrade'` listener on the
+/// main thread. Called each tick by perry-stdlib's pump (gated on
+/// `external-http-server-pump`). Returns the total count drained.
+///
+/// **Async-handler caveat**: pre-#604 `process_pending` blocked on a
+/// `wait_for_promise(...)` synchronous spin so an `async (req, res) =>
+/// { await x; res.end(...) }` handler had its returned Promise fully
+/// settled before the next tick. With `listen()` now non-blocking,
+/// blocking the pump on a per-handler basis would re-introduce the
+/// same problem (the pump runs on the main TS thread, so a blocking
+/// wait here would block subsequent timer ticks / other pending
+/// resolutions). The current implementation drops that wait — the
+/// handler's microtasks fire via the next iteration of the
+/// codegen-emitted event loop, and the
+/// `synthesize_default_response_if_needed` safety net catches the
+/// case where the response oneshot hasn't fired by the time we drop
+/// the per-request handles. **Follow-up**: track an in-flight
+/// per-request set so the pump only frees the request handles after
+/// the handler-returned Promise settles, allowing async handlers
+/// that yield across multiple microtask cycles. The simple
+/// `(req, res) => res.end(...)` shape that the load-bearing #604
+/// fixture uses works without this — the response oneshot fires
+/// synchronously from inside `js_node_http_res_end`.
+#[no_mangle]
+pub extern "C" fn js_node_http_server_process_pending() -> i32 {
+    let mut count = 0i32;
+
+    // Snapshot handle ids first so we can mutate handle state
+    // (drain channels, free per-request handles) without the
+    // DashMap iterator dangling.
+    let mut http_handles: Vec<i64> = Vec::new();
+    perry_ffi::iter_handle_ids_of::<HttpServer, _>(|id| http_handles.push(id));
+    for h in http_handles {
+        // Drain upgrades first so they don't get starved by a busy
+        // request stream.
+        while let Some(up) = try_recv_upgrade(h) {
             crate::upgrade::fire_upgrade_listeners(
                 up.server_handle,
                 up.request_handle,
                 up.ws_id,
                 Vec::new(),
             );
+            count += 1;
         }
-        let pending = match try_recv_pending(server_handle) {
-            Some(p) => p,
-            None => continue,
-        };
-        process_pending(pending);
+        while let Some(p) = try_recv_pending_nonblocking(h) {
+            process_pending(p);
+            count += 1;
+        }
     }
-    // Match the `js_gc_enter_unsafe_zone` call from
-    // `js_node_http_server_listen` — without the matching exit, the GC
-    // would stay suppressed even after the server shuts down.
-    unsafe {
-        js_gc_exit_unsafe_zone();
+
+    let mut https_handles: Vec<i64> = Vec::new();
+    perry_ffi::iter_handle_ids_of::<crate::https_server::HttpsServer, _>(|id| {
+        https_handles.push(id)
+    });
+    for h in https_handles {
+        while let Some(p) = crate::https_server::try_recv_pending_https_nonblocking(h) {
+            crate::https_server::process_pending_https(p);
+            count += 1;
+        }
     }
+
+    let mut h2_handles: Vec<i64> = Vec::new();
+    perry_ffi::iter_handle_ids_of::<crate::http2_server::Http2SecureServer, _>(|id| {
+        h2_handles.push(id)
+    });
+    for h in h2_handles {
+        while let Some(p) = crate::http2_server::try_recv_pending_h2_nonblocking(h) {
+            crate::http2_server::process_pending_h2(p);
+            count += 1;
+        }
+    }
+
+    count
+}
+
+fn server_is_active(s: &HttpServer) -> bool {
+    if s.listening {
+        return true;
+    }
+    // Even if the user has called close(), the channels may still
+    // hold queued items the pump needs to drain on a subsequent tick
+    // before the program can exit cleanly.
+    if let Some(rx) = s.request_rx.as_ref() {
+        if !rx.is_closed() && rx.len() > 0 {
+            return true;
+        }
+    }
+    if let Some(rx) = s.upgrade_rx.as_ref() {
+        if !rx.is_closed() && rx.len() > 0 {
+            return true;
+        }
+    }
+    false
 }
 
 fn try_recv_upgrade(server_handle: i64) -> Option<HttpPendingUpgrade> {
@@ -550,31 +662,21 @@ fn try_recv_upgrade(server_handle: i64) -> Option<HttpPendingUpgrade> {
     None
 }
 
-fn try_recv_pending(server_handle: i64) -> Option<HttpPendingRequest> {
-    use std::time::{Duration, Instant};
-    let deadline = Instant::now() + Duration::from_millis(10);
-    loop {
-        // Borrow the rx briefly to call try_recv.
-        let result = if let Some(s) = get_handle_mut::<HttpServer>(server_handle) {
-            if let Some(rx) = s.request_rx.as_mut() {
-                rx.try_recv()
-            } else {
-                return None;
-            }
-        } else {
-            return None;
-        };
-        match result {
-            Ok(p) => return Some(p),
-            Err(mpsc::error::TryRecvError::Disconnected) => return None,
-            Err(mpsc::error::TryRecvError::Empty) => {
-                if Instant::now() >= deadline {
-                    return None;
-                }
-                std::thread::sleep(Duration::from_micros(200));
-            }
+/// Non-blocking try_recv. Unlike the pre-#604 `try_recv_pending` which
+/// spun for up to 10ms waiting for a message, this returns
+/// immediately so the pump can move on to the next server / next tick.
+/// The codegen-emitted main loop's `js_wait_for_event` provides the
+/// blocking wait at the outer level via condvar, so we don't need to
+/// spin here.
+pub(crate) fn try_recv_pending_nonblocking(
+    server_handle: i64,
+) -> Option<HttpPendingRequest> {
+    if let Some(s) = get_handle_mut::<HttpServer>(server_handle) {
+        if let Some(rx) = s.request_rx.as_mut() {
+            return rx.try_recv().ok();
         }
     }
+    None
 }
 
 /// Dispatch one pending request — fire `'request'` listeners, then
@@ -600,29 +702,23 @@ fn process_pending(pending: HttpPendingRequest) {
         }
     }
 
-    // Main handler.
+    // Main handler. Per the issue #604 architectural change documented
+    // on `js_node_http_server_process_pending`, we no longer
+    // synchronously block on the handler's returned Promise — that
+    // would re-introduce the listen()-blocks-main-thread problem at
+    // a per-request granularity. The handler is expected to call
+    // `res.end(...)` itself; subsequent microtasks fire via the next
+    // tick of the codegen-emitted main loop. The
+    // `synthesize_default_response_if_needed` safety net below
+    // catches the case where neither path completed in time.
     if pending.handler != 0 {
-        let result = unsafe {
+        unsafe {
             let raw = pending.handler as *const RawClosureHeader;
             let closure = JsClosure::from_raw(raw);
-            if closure.is_null() {
-                f64::from_bits(TAG_UNDEFINED)
-            } else {
-                closure.call2(req_f64, res_f64)
+            if !closure.is_null() {
+                let _ = closure.call2(req_f64, res_f64);
             }
-        };
-        unsafe {
             js_promise_run_microtasks();
-        }
-        // Await any returned Promise so `async (req, res) => …`
-        // handlers settle before the next iteration.
-        let jsv = JsValue::from_bits(result.to_bits());
-        if jsv.is_pointer() {
-            let ptr = jsv.as_pointer::<Promise>();
-            if !ptr.is_null() && unsafe { js_is_promise(ptr) } != 0 {
-                wait_for_promise(ptr);
-                let _ = unsafe { js_promise_value(ptr) };
-            }
         }
     }
 

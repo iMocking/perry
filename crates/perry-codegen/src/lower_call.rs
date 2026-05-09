@@ -4430,11 +4430,15 @@ pub(super) fn lower_fetch_native_method(
         if let Some(recv) = object {
             let recv_handle = lower_expr(ctx, recv)?;
             let blk = ctx.block();
-            // The awaited axios response is a Handle (i64) stored in f64 bits
-            // via f64::from_bits(handle as u64). Use bitcast, not fptosi —
-            // fptosi interprets the f64 as a number (5e-324 for handle=1)
-            // and truncates to 0.
-            let h_i64 = blk.bitcast_double_to_i64(&recv_handle);
+            // The awaited axios response is a Handle (i64) NaN-boxed via
+            // `JsValue::from_object_ptr(handle as *mut ())` (POINTER_TAG |
+            // (handle & POINTER_MASK)). Use `unbox_to_i64` to strip the
+            // tag and recover the bare handle id; calling
+            // `bitcast_double_to_i64` alone leaves the upper-16 tag bits
+            // and the runtime's `get_handle::<AxiosResponseHandle>` lookup
+            // misses, returning 0 / undefined for every property. (#604
+            // followup — only surfaced once the listen() hang was fixed.)
+            let h_i64 = unbox_to_i64(blk, &recv_handle);
             match method {
                 "status" => {
                     let status = blk.call(DOUBLE, "js_axios_response_status", &[(I64, &h_i64)]);
@@ -4445,8 +4449,15 @@ pub(super) fn lower_fetch_native_method(
                     return Ok(Some(nanbox_string_inline(blk, &str_ptr)));
                 }
                 "data" => {
-                    let str_ptr = blk.call(I64, "js_axios_response_data", &[(I64, &h_i64)]);
-                    return Ok(Some(nanbox_string_inline(blk, &str_ptr)));
+                    // Use the auto-parsed variant (JSON when the body
+                    // looks like JSON, raw string otherwise) so
+                    // `r.data.ok` / `r.data[0]` work the same way as
+                    // in npm `axios`. The function returns a NaN-boxed
+                    // f64 directly; no need to nanbox here. (#604
+                    // followup — only surfaced once listen() hang fix
+                    // unblocked the axios chain.)
+                    let v = blk.call(DOUBLE, "js_axios_response_data_parsed", &[(I64, &h_i64)]);
+                    return Ok(Some(v));
                 }
                 _ => {}
             }

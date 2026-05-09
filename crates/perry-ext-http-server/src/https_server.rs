@@ -15,8 +15,8 @@ use hyper::service::service_fn;
 use hyper::{body::Incoming, Request, Response};
 use hyper_util::rt::TokioIo;
 use perry_ffi::{
-    alloc_string, get_handle, get_handle_mut, register_handle, JsClosure, JsValue,
-    RawClosureHeader, StringHeader,
+    alloc_string, get_handle, get_handle_mut, register_handle, JsClosure, RawClosureHeader,
+    StringHeader,
 };
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
@@ -73,7 +73,8 @@ unsafe fn parse_https_opts(opts_f64: f64) -> (String, String, bool) {
     (key_pem, cert_pem, enable_h2)
 }
 use crate::types::{
-    extract_host, extract_port, js_gc_enter_unsafe_zone, read_string_header, POINTER_TAG, PTR_MASK,
+    extract_host, extract_port, js_gc_enter_unsafe_zone, js_promise_run_microtasks,
+    read_string_header, POINTER_TAG, PTR_MASK,
 };
 
 /// `https.createServer(opts, handler)` — opts carries `{ key, cert }`
@@ -258,9 +259,10 @@ pub unsafe extern "C" fn js_node_https_server_listen(
         }
     }
 
-    // Reuse the HTTP/1.1 event loop — both server flavors push into
-    // identical `HttpPendingRequest`s, so the dispatch path is shared.
-    https_event_loop(server_handle);
+    // Closes #604 — `listen()` is now non-blocking. Pending requests
+    // are drained via the unified `js_node_http_server_process_pending`
+    // pump in `server.rs`, which iterates HTTP/1, HTTPS, and HTTP/2
+    // handles each tick.
 }
 
 async fn handle_https_request(
@@ -328,89 +330,53 @@ async fn handle_https_request(
     }
 }
 
-/// HTTPS server event loop. Same shape as the HTTP one but reads
-/// the rx out of `HttpsServer.base`.
-fn https_event_loop(server_handle: i64) {
-    use crate::types::{js_is_promise, js_promise_run_microtasks, js_promise_value, wait_for_promise, Promise, TAG_UNDEFINED};
-    loop {
-        unsafe {
-            js_promise_run_microtasks();
+/// Non-blocking try_recv for HTTPS pending requests. Called by
+/// `js_node_http_server_process_pending` in `server.rs` each tick.
+pub(crate) fn try_recv_pending_https_nonblocking(
+    server_handle: i64,
+) -> Option<HttpPendingRequest> {
+    if let Some(s) = get_handle_mut::<HttpsServer>(server_handle) {
+        if let Some(rx) = s.base.request_rx.as_mut() {
+            return rx.try_recv().ok();
         }
-        let pending = match try_recv_pending_https(server_handle) {
-            Some(p) => p,
-            None => continue,
-        };
-        // Inline dispatch — duplicated tiny block from `server::process_pending`
-        // because the per-server-shape types differ. (Unifying through a
-        // trait would require more boilerplate than copying ~30 lines.)
-        let req_f64 = handle_to_pointer_f64(pending.request_handle);
-        let res_f64 = handle_to_pointer_f64(pending.response_handle);
-        for cb in &pending.request_listeners {
-            if *cb == 0 {
-                continue;
-            }
-            unsafe {
-                let raw = *cb as *const RawClosureHeader;
-                let closure = JsClosure::from_raw(raw);
-                if !closure.is_null() {
-                    let _ = closure.call2(req_f64, res_f64);
-                }
-                js_promise_run_microtasks();
-            }
-        }
-        if pending.handler != 0 {
-            let result = unsafe {
-                let raw = pending.handler as *const RawClosureHeader;
-                let closure = JsClosure::from_raw(raw);
-                if closure.is_null() {
-                    f64::from_bits(TAG_UNDEFINED)
-                } else {
-                    closure.call2(req_f64, res_f64)
-                }
-            };
-            unsafe {
-                js_promise_run_microtasks();
-            }
-            let jsv = JsValue::from_bits(result.to_bits());
-            if jsv.is_pointer() {
-                let ptr = jsv.as_pointer::<Promise>();
-                if !ptr.is_null() && unsafe { js_is_promise(ptr) } != 0 {
-                    wait_for_promise(ptr);
-                    let _ = unsafe { js_promise_value(ptr) };
-                }
-            }
-        }
-        // Synthesize default response if handler didn't end.
-        crate::server::synthesize_default_response_if_needed(pending.response_handle);
-        perry_ffi::drop_handle(pending.request_handle);
-        perry_ffi::drop_handle(pending.response_handle);
     }
+    None
 }
 
-fn try_recv_pending_https(server_handle: i64) -> Option<HttpPendingRequest> {
-    use std::time::{Duration, Instant};
-    let deadline = Instant::now() + Duration::from_millis(10);
-    loop {
-        let result = if let Some(s) = get_handle_mut::<HttpsServer>(server_handle) {
-            if let Some(rx) = s.base.request_rx.as_mut() {
-                rx.try_recv()
-            } else {
-                return None;
+/// Dispatch one HTTPS pending request — fire `'request'` listeners,
+/// then the main handler. Same shape as `server::process_pending`
+/// (the per-server struct differs but the dispatch logic is
+/// identical). Per the issue #604 architectural change, we no
+/// longer block on the handler-returned Promise.
+pub(crate) fn process_pending_https(pending: HttpPendingRequest) {
+    let req_f64 = handle_to_pointer_f64(pending.request_handle);
+    let res_f64 = handle_to_pointer_f64(pending.response_handle);
+    for cb in &pending.request_listeners {
+        if *cb == 0 {
+            continue;
+        }
+        unsafe {
+            let raw = *cb as *const RawClosureHeader;
+            let closure = JsClosure::from_raw(raw);
+            if !closure.is_null() {
+                let _ = closure.call2(req_f64, res_f64);
             }
-        } else {
-            return None;
-        };
-        match result {
-            Ok(p) => return Some(p),
-            Err(mpsc::error::TryRecvError::Disconnected) => return None,
-            Err(mpsc::error::TryRecvError::Empty) => {
-                if Instant::now() >= deadline {
-                    return None;
-                }
-                std::thread::sleep(Duration::from_micros(200));
-            }
+            js_promise_run_microtasks();
         }
     }
+    if pending.handler != 0 {
+        unsafe {
+            let raw = pending.handler as *const RawClosureHeader;
+            let closure = JsClosure::from_raw(raw);
+            if !closure.is_null() {
+                let _ = closure.call2(req_f64, res_f64);
+            }
+            js_promise_run_microtasks();
+        }
+    }
+    crate::server::synthesize_default_response_if_needed(pending.response_handle);
+    perry_ffi::drop_handle(pending.request_handle);
+    perry_ffi::drop_handle(pending.response_handle);
 }
 
 /// `httpsServer.address()` mirroring `http.Server.address()`.
@@ -457,6 +423,8 @@ pub unsafe extern "C" fn js_node_https_server_close(handle: i64, callback: i64) 
             let _ = closure.call0();
         }
     }
+    // Closes #604 — match `js_gc_enter_unsafe_zone` from listen().
+    crate::types::js_gc_exit_unsafe_zone();
 }
 
 /// `httpsServer.on(event, cb)`.

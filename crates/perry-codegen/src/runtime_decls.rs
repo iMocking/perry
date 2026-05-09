@@ -1617,6 +1617,11 @@ pub fn declare_stdlib_ffi(module: &mut LlModule) {
     module.declare_function("js_axios_response_status", DOUBLE, &[I64]);
     module.declare_function("js_axios_response_status_text", I64, &[I64]);
     module.declare_function("js_axios_response_data", I64, &[I64]);
+    // Issue #604 followup — JSON-auto-parsing variant of `.data`. Returns
+    // a NaN-boxed JSValue (parsed object/array/number/bool/null when the
+    // response body is JSON, raw string otherwise) so `r.data.ok` works
+    // the same way as npm `axios` does for `application/json` responses.
+    module.declare_function("js_axios_response_data_parsed", DOUBLE, &[I64]);
 
     // ========== sharp / image ==========
     module.declare_function("js_sharp_blur", I64, &[I64, DOUBLE]);

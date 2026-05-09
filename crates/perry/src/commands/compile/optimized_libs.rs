@@ -295,6 +295,25 @@ pub(super) fn build_optimized_libs(
             if original_features.contains(&"bundled-ws") {
                 features.insert("external-ws-pump");
             }
+            // Closes #604 — when the well-known flip routes `node:http` /
+            // `node:https` / `node:http2` to perry-ext-http (which bundles
+            // perry-ext-http-server), activate `external-http-server-pump`
+            // so perry-stdlib's main-thread pump and active-handles gate
+            // call into perry-ext-http-server's queue each tick. Without
+            // this, the http server's accept-loop tokio task pushes
+            // requests that nobody drains, and the program hangs (pre-#604
+            // listen() blocked the main thread; post-#604 listen() is
+            // non-blocking but needs the pump to fire).
+            //
+            // Gate strictly on the MODULE name (not on `http-client`
+            // feature, which axios / node-fetch also map to) — those
+            // bring perry-ext-axios / perry-ext-fetch which don't define
+            // `js_node_http_server_*` symbols. Activating the pump for
+            // them would drop unresolved externs at link time.
+            let module_normalized = module.strip_prefix("node:").unwrap_or(module);
+            if matches!(module_normalized, "http" | "https" | "http2") {
+                features.insert("external-http-server-pump");
+            }
         }
     }
 

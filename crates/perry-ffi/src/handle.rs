@@ -157,6 +157,36 @@ where
     }
 }
 
+/// Visit every registered handle id whose stored type matches `T`,
+/// invoking `f(handle_id)` for each.
+///
+/// Unlike [`iter_handles_of`], this hands the caller the integer
+/// handle id rather than a borrow. Useful when the callback needs
+/// to perform operations that can't be expressed against `&T`
+/// (e.g. methods on `T` that need `&mut T`, or sites that must
+/// drop / re-register the handle).
+///
+/// Caller is responsible for not removing the handle while the
+/// iteration is in progress — the underlying `DashMap` iterator
+/// holds shards but doesn't pin entire entries. The recommended
+/// pattern is to snapshot ids into a `Vec` first, then act on each
+/// id outside the iteration.
+///
+/// Added by issue #604 — perry-ext-http-server's main-thread pump
+/// needs to walk every registered HttpServer / HttpsServer /
+/// Http2SecureServer handle each tick to drain pending requests.
+pub fn iter_handle_ids_of<T, F>(mut f: F)
+where
+    T: 'static + Send + Sync,
+    F: FnMut(Handle),
+{
+    for entry in HANDLES.iter() {
+        if entry.value().downcast_ref::<T>().is_some() {
+            f(*entry.key());
+        }
+    }
+}
+
 /// Register a GC root scanner with perry's runtime. The scanner
 /// is called during every GC mark phase; it should call its `mark`
 /// callback with each NaN-boxed JsValue that should be kept alive.

@@ -131,6 +131,19 @@ bundled-net = ["async-runtime"]
 # extern reference) when perry-ext-net is guaranteed to be linked.
 external-net-pump = ["async-runtime"]
 
+# Activated by `optimized_libs::build_optimized_libs` (v0.5.714) when
+# the well-known flip routes `node:http` / `node:https` / `node:http2`
+# to perry-ext-http (which bundles perry-ext-http-server). Tells
+# perry-stdlib's `js_stdlib_process_pending` and
+# `js_stdlib_has_active_handles` to call into perry-ext-http-server's
+# `js_node_http_server_process_pending` / `js_node_http_server_has_active`
+# externs each tick. Without this, the http server's accept-loop
+# tokio task pushes pending requests that nobody drains and the
+# program either hangs (pre-fix listen() blocked the main thread)
+# or exits before the listener task can dispatch any request.
+# Mirrors `external-net-pump` and `external-ws-pump`. Closes #604.
+external-http-server-pump = ["async-runtime"]
+
 # TLS — direct `tls.connect()` and `socket.upgradeToTLS()` (Postgres SSLRequest flow).
 # Uses rustls (not native-tls) to avoid OpenSSL on every platform and keep Android
 # cross-compile unblocked; matches reqwest/tokio-tungstenite/mongodb feature flags.

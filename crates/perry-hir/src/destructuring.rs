@@ -1286,8 +1286,32 @@ pub(crate) fn lower_var_decl_with_destructuring(
                                 if module_name == "perry/tui" && method_name == "state" {
                                     ctx.register_native_instance(
                                         name.clone(),
-                                        module_name,
+                                        module_name.clone(),
                                         "State".to_string(),
+                                    );
+                                }
+                                // node:http / node:https / node:http2 — issue #604
+                                // followup to #577. The module-level decl path
+                                // (lower.rs:5530) already handles `const s =
+                                // createServer(...)` at top level; this arm
+                                // covers the inside-function case where the
+                                // factory call lives in a body. Without this,
+                                // `async function main() { const server =
+                                // createServer(handler); server.listen(...); }`
+                                // had `server` unregistered, so the listen
+                                // dispatch fell through the class_filter
+                                // gate and never invoked the cb closure.
+                                let http_class = match (module_name.as_str(), method_name.as_str()) {
+                                    ("http", "createServer") => Some("HttpServer"),
+                                    ("https", "createServer") => Some("HttpsServer"),
+                                    ("http2", "createSecureServer") => Some("Http2SecureServer"),
+                                    _ => None,
+                                };
+                                if let Some(cn) = http_class {
+                                    ctx.register_native_instance(
+                                        name.clone(),
+                                        module_name,
+                                        cn.to_string(),
                                     );
                                 }
                             }
@@ -1319,6 +1343,20 @@ pub(crate) fn lower_var_decl_with_destructuring(
                                                         "createConnection",
                                                     ) => Some("Connection"),
                                                     ("pg", "connect") => Some("Client"),
+                                                    // axios.get/post/put/delete/patch/request — mirror
+                                                    // the top-level decl arm in lower.rs:4011 so
+                                                    // `await axios.get(...)` registers the result as
+                                                    // an axios.Response inside async function bodies.
+                                                    // Without this, `r.status` / `r.data` fall through
+                                                    // to generic property dispatch and read the
+                                                    // raw handle pointer as an ObjectHeader. Issue
+                                                    // #604 followup — same pattern as the createServer
+                                                    // registration above.
+                                                    (
+                                                        "axios",
+                                                        "get" | "post" | "put" | "delete" | "patch"
+                                                        | "request",
+                                                    ) => Some("Response"),
                                                     _ => None,
                                                 };
                                             if let Some(class_name) = class_name {

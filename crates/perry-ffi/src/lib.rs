@@ -52,8 +52,8 @@ pub use async_runtime::{
 mod handle;
 pub use handle::{
     drop_handle, gc_register_root_scanner, get_handle, get_handle_mut, handle_exists,
-    iter_handles_of, register_handle, take_handle, with_handle, with_handle_mut, Handle,
-    INVALID_HANDLE,
+    iter_handle_ids_of, iter_handles_of, register_handle, take_handle, with_handle,
+    with_handle_mut, Handle, INVALID_HANDLE,
 };
 
 mod jsvalue;

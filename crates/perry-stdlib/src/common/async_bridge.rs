@@ -277,6 +277,22 @@ pub extern "C" fn js_stdlib_process_pending() -> i32 {
         count += net_count;
     }
 
+    // Process pending HTTP server requests + WS upgrades (perry-ext-http-server).
+    // Closes #604 — pre-fix `js_node_http_server_listen` blocked the
+    // main TS thread inside an inner event_loop, so axios.get/etc.
+    // after a `server.listen(port, () => resolve())` callback never
+    // ran. Now `listen()` returns immediately and pending requests
+    // are drained from the unified pump on every tick. Mirrors the
+    // `external-net-pump` / `external-ws-pump` patterns above.
+    #[cfg(feature = "external-http-server-pump")]
+    {
+        extern "C" {
+            fn js_node_http_server_process_pending() -> i32;
+        }
+        let n = unsafe { js_node_http_server_process_pending() };
+        count += n;
+    }
+
     // Process pending worker_threads messages (stdin reader)
     count += crate::worker_threads::js_worker_threads_process_pending();
 
@@ -379,6 +395,22 @@ pub extern "C" fn js_stdlib_has_active_handles() -> i32 {
             fn js_ext_net_has_active_handles() -> i32;
         }
         if unsafe { js_ext_net_has_active_handles() } != 0 {
+            return 1;
+        }
+    }
+    // Active HTTP/HTTPS/HTTP2 servers — keep the event loop alive
+    // for the lifetime of any listening server (until the user calls
+    // `server.close()`). Without this gate, the codegen-emitted main
+    // loop sees no active sources and exits before the first request
+    // ever arrives. Closes #604 — paired with the
+    // `js_node_http_server_process_pending` arm in
+    // `js_stdlib_process_pending` above.
+    #[cfg(feature = "external-http-server-pump")]
+    {
+        extern "C" {
+            fn js_node_http_server_has_active() -> i32;
+        }
+        if unsafe { js_node_http_server_has_active() } != 0 {
             return 1;
         }
     }

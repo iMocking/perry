@@ -228,9 +228,67 @@ pub extern "C" fn js_axios_response_status_text(handle: Handle) -> *mut StringHe
         .unwrap_or(std::ptr::null_mut())
 }
 
-/// `response.data -> string`.
+/// `response.data -> string`. Legacy/backwards-compat — returns the
+/// raw response body bytes as a perry string. For the JSON-auto-parse
+/// path that npm `axios` provides (where `r.data.ok` works directly
+/// when the server returns `application/json`), see
+/// `js_axios_response_data_parsed` below.
 #[no_mangle]
 pub extern "C" fn js_axios_response_data(handle: Handle) -> *mut StringHeader {
     with_handle::<AxiosResponseHandle, _, _>(handle, |r| alloc_string(&r.data).as_raw())
         .unwrap_or(std::ptr::null_mut())
+}
+
+/// `response.data -> any` — auto-parsed variant. npm `axios` parses
+/// the response body as JSON when the response's content-type starts
+/// with `application/json`; otherwise it hands back the raw string.
+/// Returns an f64 NaN-boxed JSValue: a string for non-JSON, a parsed
+/// object/array/number/bool/null for JSON. Returns the string fallback
+/// on any parse error so callers don't have to special-case malformed
+/// JSON. The TS-side `r.data` getter routes here so `r.data.ok` /
+/// `r.data[0]` / etc. work the same way as in node `axios`. Issue
+/// #604 followup — only surfaced once the listen() hang was fixed.
+#[no_mangle]
+pub extern "C" fn js_axios_response_data_parsed(handle: Handle) -> f64 {
+    let body = match with_handle::<AxiosResponseHandle, _, _>(handle, |r| r.data.clone()) {
+        Some(b) => b,
+        None => return f64::from_bits(0x7FFC_0000_0000_0001), // TAG_UNDEFINED
+    };
+    let trimmed = body.trim_start();
+    let looks_like_json = trimmed.starts_with('{')
+        || trimmed.starts_with('[')
+        || trimmed.starts_with('"')
+        || trimmed.starts_with("true")
+        || trimmed.starts_with("false")
+        || trimmed.starts_with("null")
+        || trimmed
+            .chars()
+            .next()
+            .map(|c| c == '-' || c.is_ascii_digit())
+            .unwrap_or(false);
+    if looks_like_json {
+        // Cross the FFI boundary into the runtime's JSON parser. The
+        // runtime returns `undefined` (TAG_UNDEFINED) on parse error,
+        // which we detect and fall through to the raw-string path so
+        // the user always gets *something* on `r.data`. Note: the
+        // runtime's `js_json_parse` declares its return type as
+        // `JSValue` (repr(transparent) over u64), so we declare it
+        // here as `u64` rather than `f64` to keep the AArch64 ABI on
+        // the integer register (x0) instead of the float register (d0).
+        extern "C" {
+            fn js_json_parse(ptr: *const StringHeader) -> u64;
+        }
+        let s = alloc_string(&body);
+        let parsed_bits = unsafe { js_json_parse(s.as_raw()) };
+        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+        if parsed_bits != TAG_UNDEFINED {
+            return f64::from_bits(parsed_bits);
+        }
+    }
+    // Non-JSON or parse failure — return the raw body as a perry
+    // string. NaN-boxed via STRING_TAG so the receiver sees it as a
+    // proper JS string.
+    let s = alloc_string(&body);
+    let bits = 0x7FFF_0000_0000_0000_u64 | (s.as_raw() as u64 & 0x0000_FFFF_FFFF_FFFF);
+    f64::from_bits(bits)
 }
