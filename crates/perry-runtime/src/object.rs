@@ -7071,6 +7071,90 @@ unsafe fn own_key_present(obj: *mut ObjectHeader, key: *const crate::StringHeade
     false
 }
 
+/// Issue #620: returns the OWN-property value at `name` if one exists in the
+/// receiver's own keys_array (a string-keyed data property), otherwise
+/// returns TAG_UNDEFINED. Used by class-method dispatch to detect override
+/// patterns like `this.method = X` (hono's SmartRouter.match rebinds itself
+/// on first call). Distinct from `js_object_get_field_by_name` because it
+/// does NOT walk the class vtable's getter chain — we only want a raw own
+/// data-property read, not a side-effecting getter invocation.
+#[no_mangle]
+pub extern "C" fn js_object_get_own_field_or_undef(
+    obj_value: f64,
+    name_ptr: *const u8,
+    name_len: usize,
+) -> f64 {
+    const TAG_UNDEF: u64 = 0x7FFC_0000_0000_0001;
+    if name_ptr.is_null() || name_len == 0 {
+        return f64::from_bits(TAG_UNDEF);
+    }
+    unsafe {
+        let obj = extract_obj_ptr(obj_value);
+        if obj.is_null() || (obj as usize) < 0x1000000 {
+            return f64::from_bits(TAG_UNDEF);
+        }
+        if (obj as usize) < crate::gc::GC_HEADER_SIZE + 0x1000 {
+            return f64::from_bits(TAG_UNDEF);
+        }
+        if !is_valid_obj_ptr(obj as *const u8) {
+            return f64::from_bits(TAG_UNDEF);
+        }
+        let gc_header =
+            (obj as *const u8).sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+        if (*gc_header).obj_type != crate::gc::GC_TYPE_OBJECT {
+            return f64::from_bits(TAG_UNDEF);
+        }
+        // Skip closures sharing the GC_TYPE_OBJECT slot (CLOSURE_MAGIC at +12).
+        let type_tag_at_12 = *((obj as *const u8).add(12) as *const u32);
+        if type_tag_at_12 == crate::closure::CLOSURE_MAGIC {
+            return f64::from_bits(TAG_UNDEF);
+        }
+        let keys = (*obj).keys_array;
+        if keys.is_null() {
+            return f64::from_bits(TAG_UNDEF);
+        }
+        let keys_ptr = keys as usize;
+        if (keys_ptr as u64) >> 48 != 0 || keys_ptr < 0x10000 {
+            return f64::from_bits(TAG_UNDEF);
+        }
+        let keys_gc =
+            (keys as *const u8).sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+        if (*keys_gc).obj_type != crate::gc::GC_TYPE_ARRAY {
+            return f64::from_bits(TAG_UNDEF);
+        }
+        let key_bytes = std::slice::from_raw_parts(name_ptr, name_len);
+        let key_count = crate::array::js_array_length(keys) as usize;
+        if key_count > 65536 {
+            return f64::from_bits(TAG_UNDEF);
+        }
+        let alloc_limit = std::cmp::max((*obj).field_count, 8) as usize;
+        for i in 0..key_count {
+            let key_val = crate::array::js_array_get(keys, i as u32);
+            if key_val.is_string() {
+                let stored_key = key_val.as_string_ptr();
+                if !stored_key.is_null() {
+                    let stored_data =
+                        (stored_key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+                    let stored_len = (*stored_key).byte_len as usize;
+                    let stored_bytes = std::slice::from_raw_parts(stored_data, stored_len);
+                    if stored_bytes == key_bytes {
+                        let val = if i < alloc_limit {
+                            js_object_get_field(obj, i as u32)
+                        } else {
+                            match overflow_get(obj as usize, i) {
+                                Some(bits) => crate::JSValue::from_bits(bits),
+                                None => return f64::from_bits(TAG_UNDEF),
+                            }
+                        };
+                        return f64::from_bits(val.bits());
+                    }
+                }
+            }
+        }
+        f64::from_bits(TAG_UNDEF)
+    }
+}
+
 /// Object.getOwnPropertyNames(obj) — returns all own property names (including non-enumerable).
 /// Takes a NaN-boxed f64 object pointer, returns a NaN-boxed f64 array pointer.
 #[no_mangle]

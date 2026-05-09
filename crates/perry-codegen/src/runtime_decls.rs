@@ -776,6 +776,15 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_typed_array_find_last_index", DOUBLE, &[I64, I64]);
     // Object introspection / mutation (Agent A's accessor-descriptor work).
     module.declare_function("js_object_has_own", DOUBLE, &[DOUBLE, DOUBLE]);
+    // Issue #620: own-property override probe used by class-method dispatch.
+    // Returns the stored value if `name` is in obj's own keys_array (data
+    // property only — no vtable getter walk), else TAG_UNDEFINED. Lets
+    // dispatch detect `this.method = X` overrides at the call site.
+    module.declare_function(
+        "js_object_get_own_field_or_undef",
+        DOUBLE,
+        &[DOUBLE, PTR, I64],
+    );
     // Refs #420: register a static computed-key Symbol field on a class.
     // Called from `init_static_fields` for each `static [Symbol.X] = init`.
     module.declare_function(

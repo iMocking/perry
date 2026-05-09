@@ -844,9 +844,13 @@ fn transform_generator_function(
 
     // Track IDs allocated during linearization (e.g. yield* delegation vars)
     let local_id_before = *next_local_id;
-    // Catches collected during linearization: each entry is (catch_param_id, catch_body).
-    // Used by the .throw() closure to re-route the exception into the catch handler.
-    let mut catches: Vec<(Option<LocalId>, Vec<Stmt>)> = Vec::new();
+    // Catches collected during linearization. Each entry is
+    // (catch_param_id, catch_body, post_catch_state). Used by the .throw()
+    // closure to re-route the exception into the catch handler — and after
+    // running the catch body, transition `__gen_state` to `post_catch_state`
+    // so the driver's next iter.next(undefined) call resumes execution at
+    // the stmts that follow the try/catch in source order (issue #621).
+    let mut catches: Vec<(Option<LocalId>, Vec<Stmt>, u32)> = Vec::new();
     linearize_body(
         &func.body,
         &mut states,
@@ -1136,7 +1140,7 @@ fn transform_generator_function(
         id
     };
     let mut throw_body: Vec<Stmt> = Vec::new();
-    if let Some((catch_param_id, catch_body)) = catches.first().cloned() {
+    if let Some((catch_param_id, catch_body, post_catch_state)) = catches.first().cloned() {
         // Assign catch parameter from the thrown value so the catch body can read `e`.
         if let Some(cp_id) = catch_param_id {
             throw_body.push(Stmt::Expr(Expr::LocalSet(
@@ -1161,12 +1165,30 @@ fn transform_generator_function(
             }
         }
         throw_body.extend(rewritten);
+        // Issue #621: after the catch body runs, transition `__gen_state`
+        // to the post-try-catch state and return `{ value: undefined,
+        // done: false }`. The async-step driver sees done=false and calls
+        // iter.next(undefined), which dispatches the post-try state and
+        // runs whatever stmts followed the try/catch in source order.
+        // (If the catch body itself contained a `return X` the trailing
+        // state-set + return are unreachable; the inlined return takes
+        // priority.)
+        throw_body.push(Stmt::Expr(Expr::LocalSet(
+            state_id,
+            Box::new(Expr::Number(post_catch_state as f64)),
+        )));
+        throw_body.push(Stmt::Return(Some(make_iter_result(
+            Expr::Undefined,
+            false,
+        ))));
+    } else {
+        // Issue #619: no user catch was seen during linearization — rethrow so
+        // the async-step driver's outer try can re-deliver the error and
+        // (per spec) the function's returned Promise rejects. Without this,
+        // iter.throw(e) silently returned {done:true} and a sync throw at
+        // an `await` position resolved to undefined instead of rejecting.
+        throw_body.push(Stmt::Throw(Expr::LocalGet(throw_param_id)));
     }
-    throw_body.push(Stmt::Expr(Expr::LocalSet(
-        done_id,
-        Box::new(Expr::Bool(true)),
-    )));
-    throw_body.push(Stmt::Return(Some(make_iter_result(Expr::Undefined, true))));
     if is_async_generator {
         wrap_returns_in_promise(&mut throw_body);
     }
@@ -1389,14 +1411,31 @@ fn build_async_step_driver(
             mutable: true,
             init: None,
         },
-        // try { r = ...; } catch (e) { return Promise.reject(e); }
+        // try { r = ...; } catch (e) {
+        //     // Issue #619: if we were already delivering an error and the
+        //     // throw closure rethrew, surface as Promise rejection. Otherwise
+        //     // re-deliver via iter.throw so the user's catch handler runs.
+        //     if (isError) return Promise.reject(e);
+        //     return __step(e, true);
+        // }
         Stmt::Try {
             body: vec![Stmt::Expr(Expr::LocalSet(r_id, Box::new(dispatch_iter)))],
             catch: Some(CatchClause {
                 param: Some((catch_e_id, "__step_catch_e".to_string())),
-                body: vec![Stmt::Return(Some(promise_reject(Expr::LocalGet(
-                    catch_e_id,
-                ))))],
+                body: vec![
+                    Stmt::If {
+                        condition: Expr::LocalGet(is_error_param_id),
+                        then_branch: vec![Stmt::Return(Some(promise_reject(Expr::LocalGet(
+                            catch_e_id,
+                        ))))],
+                        else_branch: None,
+                    },
+                    Stmt::Return(Some(Expr::Call {
+                        callee: Box::new(Expr::LocalGet(step_id)),
+                        args: vec![Expr::LocalGet(catch_e_id), Expr::Bool(true)],
+                        type_args: vec![],
+                    })),
+                ],
             }),
             finally: None,
         },
@@ -1507,7 +1546,7 @@ fn linearize_body(
     state_id: LocalId,
     #[allow(unused_variables)] next_local_id: &mut u32,
     sent_id: LocalId,
-    catches: &mut Vec<(Option<LocalId>, Vec<Stmt>)>,
+    catches: &mut Vec<(Option<LocalId>, Vec<Stmt>, u32)>,
 ) {
     for stmt in stmts {
         match stmt {
@@ -1869,11 +1908,33 @@ fn linearize_body(
                     }
                 }
 
+                // Issue #621: if the try has a catch handler, split the
+                // post-await happy-path continuation (currently in `current`)
+                // from the post-try-catch continuation. Stmts that follow
+                // the LAST yield in the try body should only run on the
+                // happy path; the throw path runs the catch body and then
+                // resumes at the stmts AFTER the try/catch. Without this
+                // split, both paths land in the same state and the catch
+                // path incorrectly runs the post-await stmts.
+                if catch.is_some() {
+                    if !current.is_empty() {
+                        let happy_state = *state_num;
+                        *state_num += 1;
+                        let goto_target = *state_num;
+                        states.push(State {
+                            num: happy_state,
+                            body: std::mem::take(current),
+                            exit: StateExit::Goto(goto_target),
+                        });
+                    }
+                }
+                let post_catch_state = *state_num;
+
                 // Stash the catch so transform_generator_function can inline it
                 // into the .throw() closure later.
                 if let Some(catch_clause) = catch {
                     let param_id = catch_clause.param.as_ref().map(|(id, _)| *id);
-                    catches.push((param_id, catch_clause.body.clone()));
+                    catches.push((param_id, catch_clause.body.clone(), post_catch_state));
                 }
 
                 // Finally block: linearize if it has yields (await-using path),

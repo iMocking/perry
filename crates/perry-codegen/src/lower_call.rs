@@ -315,6 +315,105 @@ fn try_emit_buffer_read_intrinsic(
     Ok(Some(result))
 }
 
+/// Issue #620: emit a runtime check before the static class-method dispatch.
+/// If the receiver has an own-property override at `property` (set via
+/// `this.method = X`), invoke the stored closure via `js_native_call_value`;
+/// otherwise call the static method body directly. Returns the LLVM register
+/// holding the unified result (phi over the two branches).
+fn emit_own_method_override_check(
+    ctx: &mut FnCtx<'_>,
+    recv_box: &str,
+    property: &str,
+    fallback_fn: &str,
+    fallback_arg_slices: &[(crate::types::LlvmType, &str)],
+    lowered_args: &[String],
+) -> String {
+    // Intern the property name so we can pass (ptr, len) directly to the
+    // override probe — saves an allocation vs synthesizing a StringHeader.
+    let key_idx = ctx.strings.intern(property);
+    let entry = ctx.strings.entry(key_idx);
+    let bytes_global = format!("@{}", entry.bytes_global);
+    let name_len_str = entry.byte_len.to_string();
+
+    let blk = ctx.block();
+    let own_method = blk.call(
+        DOUBLE,
+        "js_object_get_own_field_or_undef",
+        &[
+            (DOUBLE, recv_box),
+            (crate::types::PTR, &bytes_global),
+            (I64, &name_len_str),
+        ],
+    );
+    let own_bits = ctx.block().bitcast_double_to_i64(&own_method);
+    let undef_bits_str = format!("{}", crate::nanbox::TAG_UNDEFINED as i64);
+    let is_undef = ctx.block().icmp_eq(I64, &own_bits, &undef_bits_str);
+
+    let override_idx = ctx.new_block("ovrcheck.override");
+    let static_idx = ctx.new_block("ovrcheck.static");
+    let merge_idx = ctx.new_block("ovrcheck.merge");
+    let override_label = ctx.block_label(override_idx);
+    let static_label = ctx.block_label(static_idx);
+    let merge_label = ctx.block_label(merge_idx);
+
+    ctx.block().cond_br(&is_undef, &static_label, &override_label);
+
+    // Override path: spill the user args (skip lowered_args[0] which is
+    // `this`) into a fresh alloca and call js_native_call_value. The
+    // override is invoked WITHOUT a receiver — it's typically an arrow
+    // function or `.bind(...)`-bound function whose `this` is already
+    // captured/bound, matching JS semantics for assignment-to-instance.
+    ctx.current_block = override_idx;
+    let user_arg_count = lowered_args.len().saturating_sub(1);
+    let (args_ptr, args_len) = if user_arg_count == 0 {
+        ("null".to_string(), "0".to_string())
+    } else {
+        let buf_reg = ctx.func.alloca_entry_array(DOUBLE, user_arg_count);
+        for (i, a_val) in lowered_args.iter().skip(1).enumerate() {
+            let slot = ctx
+                .block()
+                .gep(DOUBLE, &buf_reg, &[(I64, &format!("{}", i))]);
+            ctx.block().store(DOUBLE, a_val, &slot);
+        }
+        let ptr_reg = ctx.block().next_reg();
+        ctx.block().emit_raw(format!(
+            "{} = getelementptr [{} x double], ptr {}, i64 0, i64 0",
+            ptr_reg, user_arg_count, buf_reg
+        ));
+        (ptr_reg, user_arg_count.to_string())
+    };
+    let v_override = ctx.block().call(
+        DOUBLE,
+        "js_native_call_value",
+        &[
+            (DOUBLE, &own_method),
+            (crate::types::PTR, &args_ptr),
+            (I64, &args_len),
+        ],
+    );
+    let after_override = ctx.block().label.clone();
+    if !ctx.block().is_terminated() {
+        ctx.block().br(&merge_label);
+    }
+
+    // Static path: original direct call to fallback_fn.
+    ctx.current_block = static_idx;
+    let v_static = ctx.block().call(DOUBLE, fallback_fn, fallback_arg_slices);
+    let after_static = ctx.block().label.clone();
+    if !ctx.block().is_terminated() {
+        ctx.block().br(&merge_label);
+    }
+
+    ctx.current_block = merge_idx;
+    ctx.block().phi(
+        DOUBLE,
+        &[
+            (v_override.as_str(), after_override.as_str()),
+            (v_static.as_str(), after_static.as_str()),
+        ],
+    )
+}
+
 /// Lower a `Call` expression. Two shapes are supported:
 /// 1. `FuncRef(id)(args...)` — direct call to a user function by HIR id.
 /// 2. `console.log(expr)` where `expr` lowers to a double — emits a
@@ -1801,8 +1900,20 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
                     lowered_args.iter().map(|s| (DOUBLE, s.as_str())).collect();
 
                 if overrides.is_empty() {
-                    // Fast path: no virtual dispatch needed.
-                    return Ok(ctx.block().call(DOUBLE, &fallback_fn, &arg_slices));
+                    // Issue #620: before falling through to the static method,
+                    // check whether the receiver has an own-property override
+                    // for `property` (set via `this.method = X` inside the
+                    // class). Hono's SmartRouter rebinds `this.match` on the
+                    // first call so subsequent calls go through the bound
+                    // fast-path closure instead of the original method.
+                    return Ok(emit_own_method_override_check(
+                        ctx,
+                        &recv_box,
+                        property,
+                        &fallback_fn,
+                        &arg_slices,
+                        &lowered_args,
+                    ));
                 }
 
                 // Step 4: virtual dispatch via class_id switch.
