@@ -888,7 +888,8 @@ pub extern "C" fn js_value_is_promise(value: f64) -> i32 {
     unsafe {
         let gc_header =
             (ptr_usize as *const u8).sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
-        if (*gc_header).obj_type == crate::gc::GC_TYPE_PROMISE {
+        let ot = (*gc_header).obj_type;
+        if ot == crate::gc::GC_TYPE_PROMISE {
             1
         } else {
             0
