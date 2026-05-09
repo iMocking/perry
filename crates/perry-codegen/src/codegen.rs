@@ -4411,6 +4411,36 @@ fn emit_string_pool(
         );
     }
 
+    // Refs #618 / #420: register every class id with the runtime so
+    // `js_value_typeof` can distinguish a class ref (NaN-boxed INT32 with
+    // class_id payload) from a real int32 numeric value. Without this,
+    // `typeof <class>` returns "number" for classes that don't define any
+    // methods (the existing `js_register_class_method` loop only fires
+    // for classes with at least one method body). drizzle's `class
+    // FakePrimitiveParam { static [entityKind] = "FakePrimitiveParam" }`
+    // and similar method-less marker classes hit this.
+    {
+        let mut all_class_ids: Vec<u32> = Vec::new();
+        for (class_name, class) in classes.iter() {
+            if *class_name != class.name {
+                continue;
+            }
+            let cid = match class_ids.get(class_name).copied() {
+                Some(c) if c != 0 => c,
+                _ => continue,
+            };
+            all_class_ids.push(cid);
+        }
+        all_class_ids.sort_unstable();
+        all_class_ids.dedup();
+        for cid in all_class_ids {
+            blk.call_void(
+                "js_register_class_id",
+                &[(crate::types::I32, &cid.to_string())],
+            );
+        }
+    }
+
     // Refs #486 (hono logger middleware): also register every class
     // getter in the runtime VTABLE_REGISTRY. Without this, cross-module
     // `obj.prop` reads (where `obj` is statically typed `any` so the

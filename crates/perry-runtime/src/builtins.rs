@@ -1211,7 +1211,18 @@ pub extern "C" fn js_value_typeof(value: f64) -> *mut StringHeader {
     } else if jsval.is_bigint() {
         get_cached(&TYPEOF_BIGINT, "bigint")
     } else if jsval.is_int32() {
-        get_cached(&TYPEOF_NUMBER, "number")
+        // Refs #618 / #420 followup: class refs share INT32_TAG storage
+        // shape (codegen emits `INT32_TAG | class_id` as the value form
+        // for `Expr::ClassRef`). Distinguish a class id from a real int32
+        // by checking the vtable registry — registered class ids return
+        // "function" per JS spec; everything else is "number".
+        let raw = jsval.bits() & 0xFFFF_FFFF;
+        let class_id = raw as u32;
+        if crate::object::is_class_id_registered(class_id) {
+            get_cached(&TYPEOF_FUNCTION, "function")
+        } else {
+            get_cached(&TYPEOF_NUMBER, "number")
+        }
     } else {
         // Regular f64 number
         get_cached(&TYPEOF_NUMBER, "number")

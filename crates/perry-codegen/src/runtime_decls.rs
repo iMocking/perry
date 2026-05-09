@@ -635,6 +635,7 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_dynamic_shr", DOUBLE, &[DOUBLE, DOUBLE]);
     module.declare_function("js_instanceof", DOUBLE, &[DOUBLE, I32]);
     module.declare_function("js_register_class_extends_error", VOID, &[I32]);
+    module.declare_function("js_register_class_id", VOID, &[I32]);
     // Inline-allocator class registration: emitted once per class
     // with a parent in the entry-block init prelude. The runtime
     // allocators register on every alloc; the inline allocator skips

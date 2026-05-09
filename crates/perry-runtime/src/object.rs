@@ -856,6 +856,55 @@ pub struct ClassVTable {
 /// Global vtable registry: class_id -> vtable
 pub static CLASS_VTABLE_REGISTRY: RwLock<Option<HashMap<u32, ClassVTable>>> = RwLock::new(None);
 
+/// Set of all registered class ids. Populated at module init by codegen
+/// emitting `js_register_class_id(cid)` for every user class — even
+/// classes without any methods. Refs #618 / #420 followup.
+pub static REGISTERED_CLASS_IDS: RwLock<Option<std::collections::HashSet<u32>>> = RwLock::new(None);
+
+/// Register a class id so `js_value_typeof` can distinguish class refs
+/// (INT32-tagged with class_id payload) from real int32 numeric values.
+#[no_mangle]
+pub unsafe extern "C" fn js_register_class_id(class_id: u32) {
+    if class_id == 0 {
+        return;
+    }
+    let mut guard = REGISTERED_CLASS_IDS.write().unwrap();
+    if guard.is_none() {
+        *guard = Some(std::collections::HashSet::new());
+    }
+    guard.as_mut().unwrap().insert(class_id);
+}
+
+/// Returns true if `class_id` corresponds to a registered class. Used by
+/// `js_value_typeof` (refs #618 / #420 followup) to distinguish a class
+/// reference (NaN-boxed INT32 with class_id payload) from a regular int32
+/// numeric value — JS spec says `typeof <class>` is "function", but
+/// Perry's INT32_TAG storage shape is shared with numeric int32, so the
+/// runtime needs an explicit registry check. Consults both
+/// REGISTERED_CLASS_IDS (every class) and CLASS_VTABLE_REGISTRY (classes
+/// with methods) so even classes registered before the explicit-id call
+/// runs still detect via the vtable.
+pub fn is_class_id_registered(class_id: u32) -> bool {
+    if class_id == 0 {
+        return false;
+    }
+    if let Ok(guard) = REGISTERED_CLASS_IDS.read() {
+        if let Some(set) = guard.as_ref() {
+            if set.contains(&class_id) {
+                return true;
+            }
+        }
+    }
+    let registry = match CLASS_VTABLE_REGISTRY.read() {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
+    registry
+        .as_ref()
+        .map(|m| m.contains_key(&class_id))
+        .unwrap_or(false)
+}
+
 /// Function pointer type for dispatching method calls on handle-based objects.
 /// Handle-based objects use small integer IDs (1, 2, 3...) instead of real heap pointers.
 /// This is registered by perry-stdlib to dispatch to Fastify, ioredis, etc.
