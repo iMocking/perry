@@ -601,6 +601,18 @@ fn get_valid_func_ptr(closure: *const ClosureHeader) -> *const u8 {
     if func_ptr_addr == 0 {
         return std::ptr::null();
     }
+    // Issue #628: BOUND_METHOD_FUNC_PTR (0xBADD_DEAD) is an intentional
+    // sentinel — not a real code address. The js_closure_callN dispatch
+    // handlers check for it explicitly and route to dispatch_bound_method
+    // instead of transmuting func_ptr to a fn pointer. Pre-fix the macOS
+    // code-range check below rejected the sentinel because 0xBADD_DEAD
+    // (~3.1 GiB) sits below the 0x1_0000_0000 (4 GiB) lower bound, so
+    // get_valid_func_ptr returned null and the closure-call returned
+    // TAG_UNDEFINED before reaching the BOUND_METHOD_FUNC_PTR arm. Pass
+    // the sentinel through here; the call sites handle it correctly.
+    if func_ptr == BOUND_METHOD_FUNC_PTR {
+        return func_ptr;
+    }
     // Validate func_ptr is in a reasonable code address range.
     // macOS ARM64: .text starts at 0x100000000, typically < 0x400000000
     // Windows x86_64: typically 0x7FF7_xxxx_xxxx (ASLR), so we allow up to 0x8000_0000_0000
