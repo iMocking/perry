@@ -5762,6 +5762,31 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
         args: &[NA_F64],
         ret: NR_I32,
     },
+    // `reply.header(name, value)` — chainable. Without this dispatch
+    // entry, every `reply.header(...)` call silently no-op'd; the runtime
+    // function existed in `runtime_decls.rs` but no NativeModSig routed
+    // user code at it. CORS hooks, Cache-Control, and content-type
+    // overrides all evaporated.
+    NativeModSig {
+        module: "fastify",
+        has_receiver: true,
+        method: "header",
+        class_filter: None,
+        runtime: "js_fastify_reply_header",
+        args: &[NA_JSV, NA_JSV],
+        ret: NR_F64,
+    },
+    // `reply.type(value)` — Fastify alias for setting `content-type`.
+    // Routes to `js_fastify_reply_type` (thin wrapper over reply_header).
+    NativeModSig {
+        module: "fastify",
+        has_receiver: true,
+        method: "type",
+        class_filter: None,
+        runtime: "js_fastify_reply_type",
+        args: &[NA_JSV],
+        ret: NR_F64,
+    },
     // Fastify context methods (Hono-style)
     NativeModSig {
         module: "fastify",

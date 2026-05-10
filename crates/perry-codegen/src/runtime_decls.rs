@@ -2125,6 +2125,7 @@ pub fn declare_stdlib_ffi(module: &mut LlModule) {
     module.declare_function("js_fastify_reply_header", I64, &[I64, I64, I64]);
     module.declare_function("js_fastify_reply_send", I32, &[I64, DOUBLE]);
     module.declare_function("js_fastify_reply_status", I64, &[I64, DOUBLE]);
+    module.declare_function("js_fastify_reply_type", I64, &[I64, I64]);
     module.declare_function("js_fastify_req_body", I64, &[I64]);
     module.declare_function("js_fastify_req_get_user_data", DOUBLE, &[I64]);
     module.declare_function("js_fastify_req_header", I64, &[I64, I64]);

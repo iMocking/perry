@@ -369,6 +369,24 @@ pub unsafe extern "C" fn js_fastify_reply_header(
     ctx_handle
 }
 
+/// `reply.type(value)` — Fastify alias for `reply.header("content-type", value)`.
+/// Returns the reply handle for chaining.
+#[no_mangle]
+pub unsafe extern "C" fn js_fastify_reply_type(
+    ctx_handle: Handle,
+    value: i64,
+) -> Handle {
+    let value = match string_from_nanboxed(value) {
+        Some(v) => v,
+        None => return ctx_handle,
+    };
+    if let Some(ctx) = get_handle_mut::<FastifyContext>(ctx_handle) {
+        ctx.response_headers
+            .push(("content-type".to_string(), value));
+    }
+    ctx_handle
+}
+
 /// `reply.send(payload)` — finalize the response. Returns true if the
 /// response was newly sent, false if `ctx.sent` was already true.
 #[no_mangle]
