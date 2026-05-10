@@ -559,20 +559,31 @@ fn is_ascii_string(s: *const StringHeader) -> bool {
 }
 
 /// Concatenate two strings
+///
+/// v0.5.78x perf: consolidate the eight is_valid_string_ptr checks into
+/// two (one per input) and read all per-input fields in a single unsafe
+/// block. The compiler should CSE the calls but visible source-level
+/// duplication makes the codegen path harder to follow and adds a
+/// real per-call cost on hot paths (1M concats / 24 ms = 24 ns each).
 #[no_mangle]
 pub extern "C" fn js_string_concat(
     a: *const StringHeader,
     b: *const StringHeader,
 ) -> *mut StringHeader {
-    let blen_a = if is_valid_string_ptr(a) {
-        unsafe { (*a).byte_len }
+    // Snapshot all validity-gated reads from `a` in one pass. For invalid
+    // pointers this stays at the zero-defaults so the rest of the function
+    // sees a "behaves like an empty string" view.
+    let a_valid = is_valid_string_ptr(a);
+    let b_valid = is_valid_string_ptr(b);
+    let (blen_a, u16len_a, flags_a) = if a_valid {
+        unsafe { ((*a).byte_len, (*a).utf16_len, (*a).flags) }
     } else {
-        0
+        (0, 0, 0)
     };
-    let blen_b = if is_valid_string_ptr(b) {
-        unsafe { (*b).byte_len }
+    let (blen_b, u16len_b, flags_b) = if b_valid {
+        unsafe { ((*b).byte_len, (*b).utf16_len, (*b).flags) }
     } else {
-        0
+        (0, 0, 0)
     };
     let total_blen = blen_a + blen_b;
 
@@ -596,33 +607,12 @@ pub extern "C" fn js_string_concat(
         }
     }
 
-    let u16len_a = if is_valid_string_ptr(a) {
-        unsafe { (*a).utf16_len }
-    } else {
-        0
-    };
-    let u16len_b = if is_valid_string_ptr(b) {
-        unsafe { (*b).utf16_len }
-    } else {
-        0
-    };
-
     let total_size = std::mem::size_of::<StringHeader>() + total_blen as usize;
 
     let raw = string_arena_alloc(total_size);
     let ptr = raw as *mut StringHeader;
 
     unsafe {
-        let flags_a = if is_valid_string_ptr(a) {
-            (*a).flags
-        } else {
-            0
-        };
-        let flags_b = if is_valid_string_ptr(b) {
-            (*b).flags
-        } else {
-            0
-        };
         (*ptr).utf16_len = u16len_a + u16len_b;
         (*ptr).byte_len = total_blen;
         (*ptr).capacity = total_blen;
@@ -631,10 +621,10 @@ pub extern "C" fn js_string_concat(
 
         let data_ptr = (ptr as *mut u8).add(std::mem::size_of::<StringHeader>());
 
-        if is_valid_string_ptr(a) && blen_a > 0 {
+        if a_valid && blen_a > 0 {
             ptr::copy_nonoverlapping(string_data(a), data_ptr, blen_a as usize);
         }
-        if is_valid_string_ptr(b) && blen_b > 0 {
+        if b_valid && blen_b > 0 {
             ptr::copy_nonoverlapping(
                 string_data(b),
                 data_ptr.add(blen_a as usize),
