@@ -476,7 +476,19 @@ impl<'a> DirectParser<'a> {
             if let Some(sso) = JSValue::try_short_string(b) {
                 return sso;
             }
-            let ptr = js_string_from_bytes(b.as_ptr(), b.len() as u32);
+            // ASCII fast path: skip `compute_utf16_len`'s byte scan
+            // (which `js_string_from_bytes` runs unconditionally) when
+            // every byte is < 0x80. Most real-world JSON payloads —
+            // user names, emails, ISO timestamps, slugs — are pure
+            // ASCII; the standalone `is_ascii()` check is vectorised
+            // (16 B/it on aarch64 NEON) so it costs ~1 ns/byte and
+            // saves the equivalent walk inside `compute_utf16_len`
+            // plus the conditional widening for non-ASCII counters.
+            let ptr = if b.is_ascii() {
+                crate::string::js_string_from_ascii_bytes(b.as_ptr(), b.len() as u32)
+            } else {
+                js_string_from_bytes(b.as_ptr(), b.len() as u32)
+            };
             JSValue::string_ptr(ptr)
         } else {
             JSValue::null()
