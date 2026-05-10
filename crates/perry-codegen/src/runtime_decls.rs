@@ -102,6 +102,13 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_string_concat_value", I64, &[I64, DOUBLE]);
     module.declare_function("js_value_concat_string", I64, &[DOUBLE, I64]);
 
+    // N-way string concat (v0.5.769): collapses a left-spine of pairwise
+    // string-typed Add nodes (`a + b + c + ...`) into a single allocation.
+    // First arg is a stack-allocated array of N NaN-boxed `f64` values;
+    // second arg is the count. Returns a raw string handle.
+    // (`crates/perry-runtime/src/string.rs::js_string_concat_chain`)
+    module.declare_function("js_string_concat_chain", I64, &[I64, I32]);
+
     // In-place append for the `x = x + y` pattern. When `x` has
     // refcount=1 (unique owner), the runtime mutates in-place and
     // returns the same pointer; otherwise it allocates a new string.
@@ -1391,6 +1398,15 @@ pub fn declare_phase_b_objects(module: &mut LlModule) {
     );
     module.declare_function("js_object_get_index_polymorphic", DOUBLE, &[I64, DOUBLE]);
     module.declare_function("js_object_get_field_by_name_f64", DOUBLE, &[I64, I64]);
+    // Issue #649: PropertyGet on `NativeModuleRef("fs"/"os"/"crypto"/...)`
+    // routes through this — codegen passes (module_name, property_name)
+    // and the runtime returns the constant value (or a sub-namespace
+    // ObjectHeader for `.constants`-style chains).
+    module.declare_function(
+        "js_native_module_property_by_name",
+        DOUBLE,
+        &[PTR, I64, PTR, I64],
+    );
     module.declare_function("js_object_get_field_ic_miss", DOUBLE, &[I64, I64, PTR]);
     // Object rest destructuring: copy all properties from src except excluded keys.
     // Takes a src object ptr and an array of NaN-boxed strings (the excluded keys),

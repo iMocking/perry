@@ -175,22 +175,78 @@ const URL_SEARCH: u32 = 6;
 const URL_HASH: u32 = 7;
 const URL_ORIGIN: u32 = 8;
 const URL_SEARCH_PARAMS: u32 = 9;
-const URL_FIELD_COUNT: u32 = 10;
+// Issue #650: username + password fields. Pre-fix `u.username` /
+// `u.password` returned undefined for `https://user:pass@example.com`
+// URLs because parse_url's authority-component decomposition didn't split
+// userinfo out of `host`. Post-processing in create_url_object extracts
+// userinfo before the object is built.
+const URL_USERNAME: u32 = 10;
+const URL_PASSWORD: u32 = 11;
+const URL_FIELD_COUNT: u32 = 12;
 
 /// Create a URL object from a string
 fn create_url_object(url_string: &str) -> *mut ObjectHeader {
-    let (protocol, host, hostname, port, pathname, search, hash) = parse_url(url_string);
+    let (protocol, mut host, mut hostname, port, pathname, search, hash) =
+        parse_url(url_string);
 
-    // Construct the full href
+    // Issue #650: extract userinfo (`user:pass@`) from `host`. parse_url
+    // leaves it as a prefix on host/hostname because the WHATWG authority
+    // component decomposition (userinfo@host:port) wasn't implemented;
+    // pre-fix `host`/`hostname`/`origin` all carried the userinfo prefix
+    // and `username`/`password` came back undefined. This post-processing
+    // pulls the userinfo back out before the object is built. Done here
+    // (not in parse_url itself) to keep parse_url's existing 7-tuple
+    // signature stable for resolve_url and the unit tests — only the
+    // create_url_object path needs the split.
+    let mut username = String::new();
+    let mut password = String::new();
+    if let Some(at_idx) = host.rfind('@') {
+        let userinfo = host[..at_idx].to_string();
+        if let Some(colon_idx) = userinfo.find(':') {
+            username = userinfo[..colon_idx].to_string();
+            password = userinfo[colon_idx + 1..].to_string();
+        } else {
+            username = userinfo;
+        }
+        let rest = host[at_idx + 1..].to_string();
+        host = rest.clone();
+        // Re-derive hostname from the cleaned host (drop port if present).
+        hostname = if let Some(port_idx) = rest.rfind(':') {
+            let p = &rest[port_idx + 1..];
+            if p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty() {
+                rest[..port_idx].to_string()
+            } else {
+                rest
+            }
+        } else {
+            rest
+        };
+    }
+
+    // Construct the full href (now includes userinfo when present, per
+    // WHATWG: `scheme://[user[:pass]@]host[:port][/path][?query][#frag]`).
+    let userinfo_prefix = if !username.is_empty() || !password.is_empty() {
+        if password.is_empty() {
+            format!("{}@", username)
+        } else {
+            format!("{}:{}@", username, password)
+        }
+    } else {
+        String::new()
+    };
     let href = if protocol == "file:" {
         format!("{}{}{}{}", protocol, pathname, search, hash)
     } else if host.is_empty() {
         format!("{}{}{}", pathname, search, hash)
     } else {
-        format!("{}//{}{}{}{}", protocol, host, pathname, search, hash)
+        format!(
+            "{}//{}{}{}{}{}",
+            protocol, userinfo_prefix, host, pathname, search, hash
+        )
     };
 
-    // Calculate origin
+    // Calculate origin (intentionally excludes userinfo per WHATWG spec —
+    // origin is the "registered domain" identity, not the credentials).
     let origin = if protocol == "file:" {
         "null".to_string() // file: URLs have "null" origin
     } else if host.is_empty() {
@@ -216,6 +272,8 @@ fn create_url_object(url_string: &str) -> *mut ObjectHeader {
         keys = js_array_push_f64(keys, create_string_f64("hash")); // 7
         keys = js_array_push_f64(keys, create_string_f64("origin")); // 8
         keys = js_array_push_f64(keys, create_string_f64("searchParams")); // 9
+        keys = js_array_push_f64(keys, create_string_f64("username")); // 10
+        keys = js_array_push_f64(keys, create_string_f64("password")); // 11
         js_object_set_keys(obj, keys);
 
         // Set all the URL properties
@@ -228,6 +286,8 @@ fn create_url_object(url_string: &str) -> *mut ObjectHeader {
         js_object_set_field_f64(obj, URL_SEARCH, create_string_f64(&search));
         js_object_set_field_f64(obj, URL_HASH, create_string_f64(&hash));
         js_object_set_field_f64(obj, URL_ORIGIN, create_string_f64(&origin));
+        js_object_set_field_f64(obj, URL_USERNAME, create_string_f64(&username));
+        js_object_set_field_f64(obj, URL_PASSWORD, create_string_f64(&password));
         // Build a real URLSearchParams object from the search string (parsed
         // lazily below). Storing a string here would break `url.searchParams.get()`
         // because the URLSearchParams method runtime functions interpret the

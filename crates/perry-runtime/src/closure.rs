@@ -572,6 +572,31 @@ unsafe fn dispatch_bound_method(closure: *const ClosureHeader, args: &[f64]) -> 
     )
 }
 
+/// Issue #648: calling a value that isn't a function (most commonly the
+/// result of a property lookup that returned undefined, e.g.
+/// `obj.missingFn()`) must throw a TypeError that user code can catch via
+/// `try { ... } catch`. Pre-fix every `js_closure_callN` (and the `_array`
+/// / `_apply_with_spread` dispatch entry points) silently returned
+/// TAG_UNDEFINED when `func_ptr` failed validation, which let
+/// `obj.missingFn(1, 2)` quietly evaluate to `undefined` and continue —
+/// the single biggest leverage source of cascading parity-test failures
+/// (`test_parity_timers` hung forever waiting on `timers.setTimeout` which
+/// silently no-op'd; `test_parity_os`/`tls`/`perf_hooks`/`http2`
+/// truncated mid-script when an unimplemented binding silently no-op'd).
+/// Now we throw via the existing `js_throw_type_error_not_a_function`
+/// machinery, which routes through Perry's exception system so a
+/// surrounding `try`/`catch` catches it (per #596).
+#[cold]
+#[inline(never)]
+fn throw_not_callable() -> ! {
+    crate::error::js_throw_type_error_not_a_function(
+        std::ptr::null(),
+        0,
+        b"value".as_ptr(),
+        5,
+    )
+}
+
 /// Validate a closure pointer and return its func_ptr if the closure is valid.
 ///
 /// Uses `read_volatile` for type_tag + `compiler_fence` to GUARANTEE that:
@@ -635,7 +660,7 @@ fn get_valid_func_ptr(closure: *const ClosureHeader) -> *const u8 {
 pub extern "C" fn js_closure_call0(closure: *const ClosureHeader) -> f64 {
     let func_ptr = get_valid_func_ptr(closure);
     if func_ptr.is_null() {
-        return f64::from_bits(crate::value::TAG_UNDEFINED);
+        throw_not_callable();
     }
     if func_ptr == BOUND_METHOD_FUNC_PTR {
         return unsafe { dispatch_bound_method(closure, &[]) };
@@ -657,7 +682,7 @@ pub extern "C" fn js_closure_call0(closure: *const ClosureHeader) -> f64 {
 pub extern "C" fn js_closure_call1(closure: *const ClosureHeader, arg0: f64) -> f64 {
     let func_ptr = get_valid_func_ptr(closure);
     if func_ptr.is_null() {
-        return f64::from_bits(crate::value::TAG_UNDEFINED);
+        throw_not_callable();
     }
     if func_ptr == BOUND_METHOD_FUNC_PTR {
         return unsafe { dispatch_bound_method(closure, &[arg0]) };
@@ -680,7 +705,7 @@ pub extern "C" fn js_closure_call1(closure: *const ClosureHeader, arg0: f64) -> 
 pub extern "C" fn js_closure_call2(closure: *const ClosureHeader, arg0: f64, arg1: f64) -> f64 {
     let func_ptr = get_valid_func_ptr(closure);
     if func_ptr.is_null() {
-        return f64::from_bits(crate::value::TAG_UNDEFINED);
+        throw_not_callable();
     }
     if func_ptr == BOUND_METHOD_FUNC_PTR {
         return unsafe { dispatch_bound_method(closure, &[arg0, arg1]) };
@@ -708,7 +733,7 @@ pub extern "C" fn js_closure_call3(
 ) -> f64 {
     let func_ptr = get_valid_func_ptr(closure);
     if func_ptr.is_null() {
-        return f64::from_bits(crate::value::TAG_UNDEFINED);
+        throw_not_callable();
     }
     if func_ptr == BOUND_METHOD_FUNC_PTR {
         return unsafe { dispatch_bound_method(closure, &[arg0, arg1, arg2]) };
@@ -741,7 +766,7 @@ pub extern "C" fn js_closure_call4(
 ) -> f64 {
     let func_ptr = get_valid_func_ptr(closure);
     if func_ptr.is_null() {
-        return f64::from_bits(crate::value::TAG_UNDEFINED);
+        throw_not_callable();
     }
     if func_ptr == BOUND_METHOD_FUNC_PTR {
         return unsafe { dispatch_bound_method(closure, &[arg0, arg1, arg2, arg3]) };
@@ -775,7 +800,7 @@ pub extern "C" fn js_closure_call5(
 ) -> f64 {
     let func_ptr = get_valid_func_ptr(closure);
     if func_ptr.is_null() {
-        return f64::from_bits(crate::value::TAG_UNDEFINED);
+        throw_not_callable();
     }
     if func_ptr == BOUND_METHOD_FUNC_PTR {
         return unsafe { dispatch_bound_method(closure, &[arg0, arg1, arg2, arg3, arg4]) };
@@ -815,7 +840,7 @@ pub extern "C" fn js_closure_call6(
 ) -> f64 {
     let func_ptr = get_valid_func_ptr(closure);
     if func_ptr.is_null() {
-        return f64::from_bits(crate::value::TAG_UNDEFINED);
+        throw_not_callable();
     }
     if func_ptr == BOUND_METHOD_FUNC_PTR {
         return unsafe { dispatch_bound_method(closure, &[arg0, arg1, arg2, arg3, arg4, arg5]) };
@@ -861,7 +886,7 @@ pub extern "C" fn js_closure_call7(
 ) -> f64 {
     let func_ptr = get_valid_func_ptr(closure);
     if func_ptr.is_null() {
-        return f64::from_bits(crate::value::TAG_UNDEFINED);
+        throw_not_callable();
     }
     if func_ptr == BOUND_METHOD_FUNC_PTR {
         return unsafe {
@@ -888,7 +913,7 @@ pub extern "C" fn js_closure_call8(
 ) -> f64 {
     let func_ptr = get_valid_func_ptr(closure);
     if func_ptr.is_null() {
-        return f64::from_bits(crate::value::TAG_UNDEFINED);
+        throw_not_callable();
     }
     if func_ptr == BOUND_METHOD_FUNC_PTR {
         return unsafe {
@@ -916,7 +941,7 @@ pub extern "C" fn js_closure_call9(
 ) -> f64 {
     let func_ptr = get_valid_func_ptr(closure);
     if func_ptr.is_null() {
-        return f64::from_bits(crate::value::TAG_UNDEFINED);
+        throw_not_callable();
     }
     if func_ptr == BOUND_METHOD_FUNC_PTR {
         return unsafe {
@@ -960,7 +985,7 @@ pub extern "C" fn js_closure_call10(
 ) -> f64 {
     let func_ptr = get_valid_func_ptr(closure);
     if func_ptr.is_null() {
-        return f64::from_bits(crate::value::TAG_UNDEFINED);
+        throw_not_callable();
     }
     if func_ptr == BOUND_METHOD_FUNC_PTR {
         return unsafe {
@@ -1006,7 +1031,7 @@ pub extern "C" fn js_closure_call11(
 ) -> f64 {
     let func_ptr = get_valid_func_ptr(closure);
     if func_ptr.is_null() {
-        return f64::from_bits(crate::value::TAG_UNDEFINED);
+        throw_not_callable();
     }
     if func_ptr == BOUND_METHOD_FUNC_PTR {
         return unsafe {
@@ -1056,7 +1081,7 @@ pub extern "C" fn js_closure_call12(
 ) -> f64 {
     let func_ptr = get_valid_func_ptr(closure);
     if func_ptr.is_null() {
-        return f64::from_bits(crate::value::TAG_UNDEFINED);
+        throw_not_callable();
     }
     if func_ptr == BOUND_METHOD_FUNC_PTR {
         return unsafe {
@@ -1108,7 +1133,7 @@ pub extern "C" fn js_closure_call13(
 ) -> f64 {
     let func_ptr = get_valid_func_ptr(closure);
     if func_ptr.is_null() {
-        return f64::from_bits(crate::value::TAG_UNDEFINED);
+        throw_not_callable();
     }
     if func_ptr == BOUND_METHOD_FUNC_PTR {
         return unsafe {
@@ -1162,7 +1187,7 @@ pub extern "C" fn js_closure_call14(
 ) -> f64 {
     let func_ptr = get_valid_func_ptr(closure);
     if func_ptr.is_null() {
-        return f64::from_bits(crate::value::TAG_UNDEFINED);
+        throw_not_callable();
     }
     if func_ptr == BOUND_METHOD_FUNC_PTR {
         return unsafe {
@@ -1220,7 +1245,7 @@ pub extern "C" fn js_closure_call15(
 ) -> f64 {
     let func_ptr = get_valid_func_ptr(closure);
     if func_ptr.is_null() {
-        return f64::from_bits(crate::value::TAG_UNDEFINED);
+        throw_not_callable();
     }
     if func_ptr == BOUND_METHOD_FUNC_PTR {
         return unsafe {
@@ -1280,7 +1305,7 @@ pub extern "C" fn js_closure_call16(
 ) -> f64 {
     let func_ptr = get_valid_func_ptr(closure);
     if func_ptr.is_null() {
-        return f64::from_bits(crate::value::TAG_UNDEFINED);
+        throw_not_callable();
     }
     if func_ptr == BOUND_METHOD_FUNC_PTR {
         return unsafe {
@@ -1612,7 +1637,7 @@ pub unsafe extern "C" fn js_closure_call_array(
 ) -> f64 {
     let closure = closure_env as *const ClosureHeader;
     if closure.is_null() {
-        return f64::from_bits(crate::value::TAG_UNDEFINED);
+        throw_not_callable();
     }
     let n = if args_len < 0 { 0 } else { args_len as usize };
     // Perry's closure-body arithmetic uses plain `fadd`/`fmul`/etc on
@@ -1800,7 +1825,7 @@ pub unsafe extern "C" fn js_closure_call_apply_with_spread(
     let bits = closure_box.to_bits();
     let closure_ptr = (bits & 0x0000_FFFF_FFFF_FFFF) as *const ClosureHeader;
     if closure_ptr.is_null() {
-        return f64::from_bits(crate::value::TAG_UNDEFINED);
+        throw_not_callable();
     }
 
     let reg_n = if regular_count < 0 {

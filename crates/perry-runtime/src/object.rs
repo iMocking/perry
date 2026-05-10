@@ -3053,6 +3053,33 @@ pub extern "C" fn js_object_get_field_by_name(
             }
         }
 
+        // Issue #649: native-module sub-namespace property access.
+        // `fs.constants.F_OK` lowers to `PropertyGet { PropertyGet { fs,
+        // "constants" }, "F_OK" }` — the inner expression's runtime value
+        // is a NATIVE_MODULE_CLASS_ID-tagged ObjectHeader produced by
+        // `js_create_native_module_namespace`; the outer PropertyGet then
+        // arrives here with the sub-namespace as receiver. Pre-fix the
+        // lookup fell through to the field-bag scan (which only stores
+        // `__module__`) and returned undefined. Now we route through
+        // `get_native_module_constant` directly.
+        if (*obj).class_id == NATIVE_MODULE_CLASS_ID && !key.is_null() {
+            let key_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+            let key_len = (*key).byte_len as usize;
+            let nb_ptr = crate::value::js_nanbox_pointer(obj as i64);
+            let module_name = get_module_name_from_namespace(nb_ptr);
+            if !module_name.is_empty() {
+                let property_name =
+                    std::str::from_utf8(std::slice::from_raw_parts(key_ptr, key_len))
+                        .unwrap_or("");
+                if let Some(val) =
+                    get_native_module_constant(module_name, property_name, nb_ptr)
+                {
+                    return JSValue::from_bits(val.to_bits());
+                }
+                return JSValue::undefined();
+            }
+        }
+
         // Refs #420 / #618 followup: `instance.constructor` returns the
         // class ref. Pre-fix this fell through to the keys_array lookup
         // which never finds "constructor" (the class itself isn't stored
@@ -5760,8 +5787,28 @@ pub unsafe extern "C" fn js_native_call_method(
         if gc_type != crate::gc::GC_TYPE_OBJECT {
             // Only accept object_type == 1 (OBJECT_TYPE_REGULAR)
             let object_type = (*obj).object_type;
+            // Closes #645: when a method falls through every dispatcher
+            // and returns NULL_OBJECT_BYTES (e.g. drizzle's
+            // `this.client.prepare(...)` where `this.client` resolved to
+            // a heap-object that doesn't dispatch any method named
+            // "prepare"), the result gets stored as `this.stmt` and the
+            // chained `this.stmt.raw().all(...)` re-enters this function
+            // with `obj` pointing at NULL_OBJECT_BYTES — a static stub in
+            // the binary's data segment, NOT the macOS userspace heap
+            // range that `is_valid_obj_ptr` requires (HEAP_MIN ==
+            // 0x200_0000_0000). Pre-fix this returned a literal `0.0`,
+            // which the codegen interprets as the IEEE-754 number zero,
+            // so the next chained method saw a number receiver and
+            // threw `(number).<method> is not a function`. Returning the
+            // null-object stub matches every other catch-all in this
+            // function and keeps `typeof === "object"` so chained
+            // operations propagate consistently instead of mid-chain
+            // numeric arithmetic on bit patterns. Truly garbage pointers
+            // benefit too — chained calls hit a stable null stub instead
+            // of mysterious numeric values.
             if !is_valid_obj_ptr(obj as *const u8) {
-                return 0.0;
+                let null_obj_ptr = &NULL_OBJECT_BYTES as *const NullObjectBytes as *mut u8;
+                return f64::from_bits(JSValue::pointer(null_obj_ptr).bits());
             }
             if object_type != crate::error::OBJECT_TYPE_REGULAR {
                 let null_obj_ptr = &NULL_OBJECT_BYTES as *const NullObjectBytes as *mut u8;
@@ -5927,12 +5974,25 @@ pub unsafe extern "C" fn js_native_call_method(
         );
     }
 
-    // Method not found — return a safe "null object" pointer instead of undefined.
-    // The generated code often NaN-unboxes the result as a pointer and dereferences it
-    // without null-checking. Returning undefined (0x7FFC000000000001) unboxes to null,
-    // causing a SIGSEGV. A null object with field_count=0 is safe to dereference.
-    let null_obj_ptr = &NULL_OBJECT_BYTES as *const NullObjectBytes as *mut u8;
-    f64::from_bits(JSValue::pointer(null_obj_ptr).bits())
+    // Issue #648: real-object receivers also throw when the method
+    // doesn't exist anywhere in the dispatch chain (no field-stored
+    // closure, no class vtable entry, no prototype walk hit). Pre-fix
+    // this catch-all returned `NULL_OBJECT_BYTES` so codegen wouldn't
+    // SIGSEGV when it NaN-unboxed the result and dereferenced it as a
+    // pointer — but that masked typo'd method calls as silent no-ops
+    // and was the single largest source of cascading parity failures
+    // (`test_parity_timers` hung waiting on `timers.setTimeout` which
+    // silently no-op'd; many other parity tests truncated mid-script
+    // when an unimplemented binding's method silently no-op'd inside
+    // the surrounding async path). Now we throw the standard `<prop>
+    // is not a function` TypeError, which `try`/`catch` catches (per
+    // #596's exception-routing fix).
+    crate::error::js_throw_type_error_not_a_function(
+        std::ptr::null(),
+        0,
+        method_name.as_ptr(),
+        method_name.len(),
+    );
 }
 
 /// Dispatch a Buffer / Uint8Array instance method call. Receiver address
@@ -6465,6 +6525,34 @@ pub extern "C" fn js_create_native_module_namespace(
     crate::value::js_nanbox_pointer(obj as i64)
 }
 
+/// Issue #649: codegen entry for `PropertyGet { NativeModuleRef(name),
+/// property }`. `NativeModuleRef` lowers to a literal `0.0` at the codegen
+/// level, so the generic PropertyGet path can't find the namespace
+/// object. This helper short-circuits to the constants dispatcher; for
+/// the chained case (`fs.constants.F_OK`) the inner call returns a
+/// sub-namespace ObjectHeader and the outer PropertyGet goes through
+/// `js_object_get_field_by_name`'s NATIVE_MODULE_CLASS_ID arm.
+#[no_mangle]
+pub unsafe extern "C" fn js_native_module_property_by_name(
+    module_name_ptr: *const u8,
+    module_name_len: usize,
+    property_name_ptr: *const u8,
+    property_name_len: usize,
+) -> f64 {
+    let module_name =
+        std::str::from_utf8(std::slice::from_raw_parts(module_name_ptr, module_name_len))
+            .unwrap_or("");
+    let property_name = std::str::from_utf8(std::slice::from_raw_parts(
+        property_name_ptr,
+        property_name_len,
+    ))
+    .unwrap_or("");
+    if let Some(val) = get_native_module_constant(module_name, property_name, 0.0) {
+        return val;
+    }
+    f64::from_bits(crate::value::TAG_UNDEFINED)
+}
+
 /// Access a property on a native module namespace object.
 /// For method references (e.g., `fs.existsSync`), creates a bound method closure.
 /// For constant properties (e.g., `path.sep`, `fs.constants`), returns the value directly.
@@ -6622,6 +6710,283 @@ unsafe fn get_native_module_constant(
         }
     };
 
+    // Issue #649: `os.constants.signals.SIGINT`, `os.constants.errno.ENOENT`,
+    // `os.constants.priority.PRIORITY_NORMAL`, `os.constants.dlopen.RTLD_LAZY`
+    // are ubiquitous in Node ecosystem code. Pre-fix every read returned
+    // undefined. Use `libc::*` on Unix for byte-identical parity with Node.
+    let os_signal_const = |prop: &str| -> Option<f64> {
+        #[cfg(unix)]
+        {
+            let v: Option<i32> = match prop {
+                "SIGHUP" => Some(libc::SIGHUP),
+                "SIGINT" => Some(libc::SIGINT),
+                "SIGQUIT" => Some(libc::SIGQUIT),
+                "SIGILL" => Some(libc::SIGILL),
+                "SIGTRAP" => Some(libc::SIGTRAP),
+                "SIGABRT" => Some(libc::SIGABRT),
+                "SIGIOT" => Some(libc::SIGABRT),
+                "SIGBUS" => Some(libc::SIGBUS),
+                "SIGFPE" => Some(libc::SIGFPE),
+                "SIGKILL" => Some(libc::SIGKILL),
+                "SIGUSR1" => Some(libc::SIGUSR1),
+                "SIGSEGV" => Some(libc::SIGSEGV),
+                "SIGUSR2" => Some(libc::SIGUSR2),
+                "SIGPIPE" => Some(libc::SIGPIPE),
+                "SIGALRM" => Some(libc::SIGALRM),
+                "SIGTERM" => Some(libc::SIGTERM),
+                "SIGCHLD" => Some(libc::SIGCHLD),
+                "SIGCONT" => Some(libc::SIGCONT),
+                "SIGSTOP" => Some(libc::SIGSTOP),
+                "SIGTSTP" => Some(libc::SIGTSTP),
+                "SIGTTIN" => Some(libc::SIGTTIN),
+                "SIGTTOU" => Some(libc::SIGTTOU),
+                "SIGURG" => Some(libc::SIGURG),
+                "SIGXCPU" => Some(libc::SIGXCPU),
+                "SIGXFSZ" => Some(libc::SIGXFSZ),
+                "SIGVTALRM" => Some(libc::SIGVTALRM),
+                "SIGPROF" => Some(libc::SIGPROF),
+                "SIGWINCH" => Some(libc::SIGWINCH),
+                "SIGIO" => Some(libc::SIGIO),
+                "SIGSYS" => Some(libc::SIGSYS),
+                #[cfg(target_os = "macos")]
+                "SIGINFO" => Some(29i32),
+                _ => None,
+            };
+            v.map(|x| x as f64)
+        }
+        #[cfg(not(unix))]
+        {
+            match prop {
+                "SIGHUP" => Some(1.0),
+                "SIGINT" => Some(2.0),
+                "SIGILL" => Some(4.0),
+                "SIGABRT" => Some(22.0),
+                "SIGFPE" => Some(8.0),
+                "SIGKILL" => Some(9.0),
+                "SIGSEGV" => Some(11.0),
+                "SIGTERM" => Some(15.0),
+                "SIGBREAK" => Some(21.0),
+                _ => None,
+            }
+        }
+    };
+
+    let os_errno_const = |prop: &str| -> Option<f64> {
+        #[cfg(unix)]
+        {
+            let v: Option<i32> = match prop {
+                "E2BIG" => Some(libc::E2BIG),
+                "EACCES" => Some(libc::EACCES),
+                "EADDRINUSE" => Some(libc::EADDRINUSE),
+                "EADDRNOTAVAIL" => Some(libc::EADDRNOTAVAIL),
+                "EAFNOSUPPORT" => Some(libc::EAFNOSUPPORT),
+                "EAGAIN" => Some(libc::EAGAIN),
+                "EALREADY" => Some(libc::EALREADY),
+                "EBADF" => Some(libc::EBADF),
+                "EBADMSG" => Some(libc::EBADMSG),
+                "EBUSY" => Some(libc::EBUSY),
+                "ECANCELED" => Some(libc::ECANCELED),
+                "ECHILD" => Some(libc::ECHILD),
+                "ECONNABORTED" => Some(libc::ECONNABORTED),
+                "ECONNREFUSED" => Some(libc::ECONNREFUSED),
+                "ECONNRESET" => Some(libc::ECONNRESET),
+                "EDEADLK" => Some(libc::EDEADLK),
+                "EDESTADDRREQ" => Some(libc::EDESTADDRREQ),
+                "EDOM" => Some(libc::EDOM),
+                "EDQUOT" => Some(libc::EDQUOT),
+                "EEXIST" => Some(libc::EEXIST),
+                "EFAULT" => Some(libc::EFAULT),
+                "EFBIG" => Some(libc::EFBIG),
+                "EHOSTUNREACH" => Some(libc::EHOSTUNREACH),
+                "EIDRM" => Some(libc::EIDRM),
+                "EILSEQ" => Some(libc::EILSEQ),
+                "EINPROGRESS" => Some(libc::EINPROGRESS),
+                "EINTR" => Some(libc::EINTR),
+                "EINVAL" => Some(libc::EINVAL),
+                "EIO" => Some(libc::EIO),
+                "EISCONN" => Some(libc::EISCONN),
+                "EISDIR" => Some(libc::EISDIR),
+                "ELOOP" => Some(libc::ELOOP),
+                "EMFILE" => Some(libc::EMFILE),
+                "EMLINK" => Some(libc::EMLINK),
+                "EMSGSIZE" => Some(libc::EMSGSIZE),
+                "EMULTIHOP" => Some(libc::EMULTIHOP),
+                "ENAMETOOLONG" => Some(libc::ENAMETOOLONG),
+                "ENETDOWN" => Some(libc::ENETDOWN),
+                "ENETRESET" => Some(libc::ENETRESET),
+                "ENETUNREACH" => Some(libc::ENETUNREACH),
+                "ENFILE" => Some(libc::ENFILE),
+                "ENOBUFS" => Some(libc::ENOBUFS),
+                "ENODATA" => Some(libc::ENODATA),
+                "ENODEV" => Some(libc::ENODEV),
+                "ENOENT" => Some(libc::ENOENT),
+                "ENOEXEC" => Some(libc::ENOEXEC),
+                "ENOLCK" => Some(libc::ENOLCK),
+                "ENOLINK" => Some(libc::ENOLINK),
+                "ENOMEM" => Some(libc::ENOMEM),
+                "ENOMSG" => Some(libc::ENOMSG),
+                "ENOPROTOOPT" => Some(libc::ENOPROTOOPT),
+                "ENOSPC" => Some(libc::ENOSPC),
+                "ENOSR" => Some(libc::ENOSR),
+                "ENOSTR" => Some(libc::ENOSTR),
+                "ENOSYS" => Some(libc::ENOSYS),
+                "ENOTCONN" => Some(libc::ENOTCONN),
+                "ENOTDIR" => Some(libc::ENOTDIR),
+                "ENOTEMPTY" => Some(libc::ENOTEMPTY),
+                "ENOTSOCK" => Some(libc::ENOTSOCK),
+                "ENOTSUP" => Some(libc::ENOTSUP),
+                "ENOTTY" => Some(libc::ENOTTY),
+                "ENXIO" => Some(libc::ENXIO),
+                "EOPNOTSUPP" => Some(libc::EOPNOTSUPP),
+                "EOVERFLOW" => Some(libc::EOVERFLOW),
+                "EPERM" => Some(libc::EPERM),
+                "EPIPE" => Some(libc::EPIPE),
+                "EPROTO" => Some(libc::EPROTO),
+                "EPROTONOSUPPORT" => Some(libc::EPROTONOSUPPORT),
+                "EPROTOTYPE" => Some(libc::EPROTOTYPE),
+                "ERANGE" => Some(libc::ERANGE),
+                "EROFS" => Some(libc::EROFS),
+                "ESPIPE" => Some(libc::ESPIPE),
+                "ESRCH" => Some(libc::ESRCH),
+                "ESTALE" => Some(libc::ESTALE),
+                "ETIME" => Some(libc::ETIME),
+                "ETIMEDOUT" => Some(libc::ETIMEDOUT),
+                "ETXTBSY" => Some(libc::ETXTBSY),
+                "EWOULDBLOCK" => Some(libc::EWOULDBLOCK),
+                "EXDEV" => Some(libc::EXDEV),
+                _ => None,
+            };
+            v.map(|x| x as f64)
+        }
+        #[cfg(not(unix))]
+        {
+            match prop {
+                "EACCES" => Some(13.0),
+                "EAGAIN" => Some(11.0),
+                "EBADF" => Some(9.0),
+                "EBUSY" => Some(16.0),
+                "EEXIST" => Some(17.0),
+                "EFAULT" => Some(14.0),
+                "EINTR" => Some(4.0),
+                "EINVAL" => Some(22.0),
+                "EIO" => Some(5.0),
+                "EISDIR" => Some(21.0),
+                "EMFILE" => Some(24.0),
+                "ENFILE" => Some(23.0),
+                "ENODEV" => Some(19.0),
+                "ENOENT" => Some(2.0),
+                "ENOMEM" => Some(12.0),
+                "ENOSPC" => Some(28.0),
+                "ENOTDIR" => Some(20.0),
+                "ENOTEMPTY" => Some(41.0),
+                "EPERM" => Some(1.0),
+                "EPIPE" => Some(32.0),
+                "ERANGE" => Some(34.0),
+                "EROFS" => Some(30.0),
+                _ => None,
+            }
+        }
+    };
+
+    let os_priority_const = |prop: &str| -> Option<f64> {
+        match prop {
+            "PRIORITY_LOW" => Some(19.0),
+            "PRIORITY_BELOW_NORMAL" => Some(10.0),
+            "PRIORITY_NORMAL" => Some(0.0),
+            "PRIORITY_ABOVE_NORMAL" => Some(-7.0),
+            "PRIORITY_HIGH" => Some(-14.0),
+            "PRIORITY_HIGHEST" => Some(-20.0),
+            _ => None,
+        }
+    };
+
+    let os_dlopen_const = |prop: &str| -> Option<f64> {
+        #[cfg(unix)]
+        {
+            match prop {
+                "RTLD_LAZY" => Some(libc::RTLD_LAZY as f64),
+                "RTLD_NOW" => Some(libc::RTLD_NOW as f64),
+                "RTLD_GLOBAL" => Some(libc::RTLD_GLOBAL as f64),
+                "RTLD_LOCAL" => Some(libc::RTLD_LOCAL as f64),
+                #[cfg(target_os = "linux")]
+                "RTLD_DEEPBIND" => Some(libc::RTLD_DEEPBIND as f64),
+                _ => None,
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            match prop {
+                "RTLD_LAZY" => Some(1.0),
+                "RTLD_NOW" => Some(2.0),
+                "RTLD_GLOBAL" => Some(8.0),
+                "RTLD_LOCAL" => Some(4.0),
+                _ => None,
+            }
+        }
+    };
+
+    // Issue #649: `crypto.constants.RSA_PKCS1_PADDING` etc. OpenSSL-defined
+    // stable values; hardcoded to match Node 24.x's published table.
+    let crypto_const = |prop: &str| -> Option<f64> {
+        match prop {
+            "OPENSSL_VERSION_NUMBER" => Some(811597840.0),
+            "SSL_OP_ALL" => Some(2147485776.0),
+            "SSL_OP_ALLOW_NO_DHE_KEX" => Some(1024.0),
+            "SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION" => Some(262144.0),
+            "SSL_OP_CIPHER_SERVER_PREFERENCE" => Some(4194304.0),
+            "SSL_OP_CISCO_ANYCONNECT" => Some(32768.0),
+            "SSL_OP_COOKIE_EXCHANGE" => Some(8192.0),
+            "SSL_OP_CRYPTOPRO_TLSEXT_BUG" => Some(2147483648.0),
+            "SSL_OP_DONT_INSERT_EMPTY_FRAGMENTS" => Some(2048.0),
+            "SSL_OP_LEGACY_SERVER_CONNECT" => Some(4.0),
+            "SSL_OP_NO_COMPRESSION" => Some(131072.0),
+            "SSL_OP_NO_ENCRYPT_THEN_MAC" => Some(524288.0),
+            "SSL_OP_NO_QUERY_MTU" => Some(4096.0),
+            "SSL_OP_NO_RENEGOTIATION" => Some(1073741824.0),
+            "SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION" => Some(65536.0),
+            "SSL_OP_NO_SSLv2" => Some(0.0),
+            "SSL_OP_NO_SSLv3" => Some(33554432.0),
+            "SSL_OP_NO_TICKET" => Some(16384.0),
+            "SSL_OP_NO_TLSv1" => Some(67108864.0),
+            "SSL_OP_NO_TLSv1_1" => Some(268435456.0),
+            "SSL_OP_NO_TLSv1_2" => Some(134217728.0),
+            "SSL_OP_NO_TLSv1_3" => Some(536870912.0),
+            "SSL_OP_PRIORITIZE_CHACHA" => Some(2097152.0),
+            "SSL_OP_TLS_ROLLBACK_BUG" => Some(8388608.0),
+            "ENGINE_METHOD_RSA" => Some(1.0),
+            "ENGINE_METHOD_DSA" => Some(2.0),
+            "ENGINE_METHOD_DH" => Some(4.0),
+            "ENGINE_METHOD_RAND" => Some(8.0),
+            "ENGINE_METHOD_EC" => Some(2048.0),
+            "ENGINE_METHOD_CIPHERS" => Some(64.0),
+            "ENGINE_METHOD_DIGESTS" => Some(128.0),
+            "ENGINE_METHOD_PKEY_METHS" => Some(512.0),
+            "ENGINE_METHOD_PKEY_ASN1_METHS" => Some(1024.0),
+            "ENGINE_METHOD_ALL" => Some(65535.0),
+            "ENGINE_METHOD_NONE" => Some(0.0),
+            "DH_CHECK_P_NOT_SAFE_PRIME" => Some(2.0),
+            "DH_CHECK_P_NOT_PRIME" => Some(1.0),
+            "DH_UNABLE_TO_CHECK_GENERATOR" => Some(4.0),
+            "DH_NOT_SUITABLE_GENERATOR" => Some(8.0),
+            "RSA_PKCS1_PADDING" => Some(1.0),
+            "RSA_NO_PADDING" => Some(3.0),
+            "RSA_PKCS1_OAEP_PADDING" => Some(4.0),
+            "RSA_X931_PADDING" => Some(5.0),
+            "RSA_PKCS1_PSS_PADDING" => Some(6.0),
+            "RSA_PSS_SALTLEN_DIGEST" => Some(-1.0),
+            "RSA_PSS_SALTLEN_MAX_SIGN" => Some(-2.0),
+            "RSA_PSS_SALTLEN_AUTO" => Some(-2.0),
+            "TLS1_VERSION" => Some(769.0),
+            "TLS1_1_VERSION" => Some(770.0),
+            "TLS1_2_VERSION" => Some(771.0),
+            "TLS1_3_VERSION" => Some(772.0),
+            "POINT_CONVERSION_COMPRESSED" => Some(2.0),
+            "POINT_CONVERSION_UNCOMPRESSED" => Some(4.0),
+            "POINT_CONVERSION_HYBRID" => Some(6.0),
+            _ => None,
+        }
+    };
+
     match module_name {
         "path" => match property {
             "sep" => {
@@ -6668,6 +7033,22 @@ unsafe fn get_native_module_constant(
             "constants" => Some(create_sub_namespace("os.constants")),
             _ => None,
         },
+        "os.constants" => match property {
+            "signals" => Some(create_sub_namespace("os.constants.signals")),
+            "errno" => Some(create_sub_namespace("os.constants.errno")),
+            "priority" => Some(create_sub_namespace("os.constants.priority")),
+            "dlopen" => Some(create_sub_namespace("os.constants.dlopen")),
+            _ => None,
+        },
+        "os.constants.signals" => os_signal_const(property),
+        "os.constants.errno" => os_errno_const(property),
+        "os.constants.priority" => os_priority_const(property),
+        "os.constants.dlopen" => os_dlopen_const(property),
+        "crypto" => match property {
+            "constants" => Some(create_sub_namespace("crypto.constants")),
+            _ => None,
+        },
+        "crypto.constants" => crypto_const(property),
         _ => None,
     }
 }

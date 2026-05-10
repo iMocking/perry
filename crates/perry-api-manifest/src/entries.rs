@@ -1344,6 +1344,10 @@ pub static API_MANIFEST: &[ApiEntry] = &[
     method("os", "networkInterfaces", false, None),
     method("os", "userInfo", false, None),
     property("os", "EOL"),
+    // Issue #649: os/crypto.constants tables — see
+    // get_native_module_constant in perry-runtime/src/object.rs.
+    property("os", "constants"),
+    property("crypto", "constants"),
     // path — methods mapped to Expr::Path* in expr_call.rs.
     method("path", "join", false, None),
     method("path", "dirname", false, None),

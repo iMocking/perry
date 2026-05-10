@@ -1536,6 +1536,21 @@ pub(super) fn lower_call(ctx: &mut LoweringContext, call: &ast::CallExpr) -> Res
                                         )));
                                     }
                                 }
+                                // Issue #648 fallout: `fs.rmSync(path, opts?)` was
+                                // historically silently no-op'd by `js_native_call_method`'s
+                                // catch-all when the method wasn't statically wired. Now
+                                // that catch-all throws, we need an explicit lowering.
+                                // Routes to FsRmRecursive (recursive removal); the
+                                // `{recursive,force,maxRetries,retryDelay}` opts arg is
+                                // ignored — `js_fs_rm_recursive` already does recursive
+                                // removal unconditionally.
+                                "rmSync" => {
+                                    if !args.is_empty() {
+                                        return Ok(Expr::FsRmRecursive(Box::new(
+                                            args.into_iter().next().unwrap(),
+                                        )));
+                                    }
+                                }
                                 _ => {} // Fall through to generic handling
                             }
                         }
@@ -5352,6 +5367,14 @@ pub(super) fn lower_call(ctx: &mut LoweringContext, call: &ast::CallExpr) -> Res
                                 }
                             }
                             "rmRecursive" => {
+                                if !args.is_empty() {
+                                    return Ok(Expr::FsRmRecursive(Box::new(
+                                        args.into_iter().next().unwrap(),
+                                    )));
+                                }
+                            }
+                            // Issue #648 fallout: see twin arm above.
+                            "rmSync" => {
                                 if !args.is_empty() {
                                     return Ok(Expr::FsRmRecursive(Box::new(
                                         args.into_iter().next().unwrap(),

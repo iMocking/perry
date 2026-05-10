@@ -1333,6 +1333,23 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 // narrowed-number unions correctly via js_number_coerce.
                 let l_is_str = crate::type_analysis::is_definitely_string_expr(ctx, left);
                 let r_is_str = crate::type_analysis::is_definitely_string_expr(ctx, right);
+
+                // N-way string concat fold (v0.5.769): when this is a
+                // chain of `a + b + c + ...` where every Add node has at
+                // least one statically-string operand, flatten the entire
+                // left-spine and emit a single `js_string_concat_chain`
+                // call. Saves N-1 intermediate StringHeader allocations
+                // per row in mixed-type CSV / log-line / template
+                // patterns. Only fires for chains of 3+ parts; smaller
+                // shapes go through the existing pairwise paths.
+                if l_is_str || r_is_str {
+                    if let Some(parts) = flatten_string_add_chain(ctx, left, right) {
+                        if parts.len() >= 3 {
+                            return lower_string_concat_chain(ctx, &parts);
+                        }
+                    }
+                }
+
                 if l_is_str && r_is_str {
                     return lower_string_concat(ctx, left, right);
                 }
@@ -3340,6 +3357,35 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // (which IS the NaN-boxed value for non-number fields — same bit
         // pattern, runtime callers re-interpret based on context).
         Expr::PropertyGet { object, property } => {
+            // Issue #649: PropertyGet on a native-module reference (`fs`,
+            // `os`, `crypto`, `path`, ...). `NativeModuleRef` lowers to a
+            // literal `0.0`, so the generic PropertyGet path can't see the
+            // namespace. Short-circuit to `js_native_module_property_by_name`
+            // which consults the constants dispatcher directly. For chained
+            // access like `fs.constants.F_OK` only the inner read fires
+            // here — `constants` returns a real NATIVE_MODULE_CLASS_ID
+            // ObjectHeader, and the outer PropertyGet routes through
+            // `js_object_get_field_by_name`'s NATIVE_MODULE_CLASS_ID arm.
+            if let Expr::NativeModuleRef(module_name) = object.as_ref() {
+                let mod_idx = ctx.strings.intern(module_name);
+                let mod_bytes_global =
+                    format!("@{}", ctx.strings.entry(mod_idx).bytes_global);
+                let mod_len_str = module_name.len().to_string();
+                let prop_idx = ctx.strings.intern(property);
+                let prop_bytes_global =
+                    format!("@{}", ctx.strings.entry(prop_idx).bytes_global);
+                let prop_len_str = property.len().to_string();
+                return Ok(ctx.block().call(
+                    DOUBLE,
+                    "js_native_module_property_by_name",
+                    &[
+                        (PTR, &mod_bytes_global),
+                        (I64, &mod_len_str),
+                        (PTR, &prop_bytes_global),
+                        (I64, &prop_len_str),
+                    ],
+                ));
+            }
             // Cross-module static field access. When `Base` is an imported
             // class, HIR lowering emits `PropertyGet { ExternFuncRef("Base"),
             // property }` instead of `StaticFieldGet` because the lowering
