@@ -156,6 +156,46 @@ pub(crate) fn lower_array_method(
             let result = blk.call(I64, "js_array_reverse", &[(I64, &recv_handle)]);
             Ok(nanbox_pointer_inline(blk, &result))
         }
+        "copyWithin" => {
+            // ECMA-262 §23.1.3.5 `arr.copyWithin(target, start?, end?)`.
+            // The HIR `Expr::ArrayCopyWithin` lowering in `expr_call.rs:3461`
+            // only fires when the receiver is a local — literal-receiver
+            // calls (`[1,2,3,4,5].copyWithin(0, 1)`) fall through to here.
+            // Without this arm the call returned the receiver unchanged,
+            // because the general method-dispatch fallback doesn't know
+            // about copyWithin and silently no-op'd.
+            if args.is_empty() {
+                bail!(
+                    "perry-codegen: Array.copyWithin expects 1-3 args, got 0",
+                );
+            }
+            let target_d = lower_expr(ctx, &args[0])?;
+            let start_d = if args.len() >= 2 {
+                lower_expr(ctx, &args[1])?
+            } else {
+                double_literal(0.0)
+            };
+            let (has_end_str, end_d) = if args.len() >= 3 {
+                let v = lower_expr(ctx, &args[2])?;
+                ("1".to_string(), v)
+            } else {
+                ("0".to_string(), "0.0".to_string())
+            };
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let result = blk.call(
+                I64,
+                "js_array_copy_within",
+                &[
+                    (I64, &recv_handle),
+                    (DOUBLE, &target_d),
+                    (DOUBLE, &start_d),
+                    (I32, &has_end_str),
+                    (DOUBLE, &end_d),
+                ],
+            );
+            Ok(nanbox_pointer_inline(blk, &result))
+        }
         "flat" => {
             // arr.flat() / arr.flat(depth) — depth is ignored for now.
             for a in args {
