@@ -2150,17 +2150,29 @@ pub unsafe extern "C" fn js_object_copy_own_fields(dst_i64: i64, src_f64: f64) {
     }
     let key_count = crate::array::js_array_length(src_keys) as usize;
     let src_field_count = (*src).field_count as usize;
+    let alloc_limit = std::cmp::max(src_field_count, 8);
     let header_size = std::mem::size_of::<ObjectHeader>();
     let src_fields = (src as *const u8).add(header_size) as *const u64;
 
-    for i in 0..key_count.min(src_field_count) {
+    // Iterate up to `key_count`, not `min(key_count, src_field_count)`.
+    // For objects with overflow fields (≥9 keys) `src_field_count` caps
+    // at the inline alloc_limit (8) and the values for slots ≥ 8 live
+    // in OVERFLOW_FIELDS — without iterating to `key_count` and routing
+    // slots ≥ alloc_limit through `js_object_get_field`, the copy
+    // silently dropped 9th..Nth properties.
+    for i in 0..key_count {
         let key_val = crate::array::js_array_get(src_keys, i as u32);
         if !key_val.is_string() {
             continue;
         }
         let key_ptr = key_val.as_string_ptr();
-        let field_bits = *src_fields.add(i);
-        let field_f64 = f64::from_bits(field_bits);
+        let field_f64 = if i < alloc_limit {
+            let field_bits = *src_fields.add(i);
+            f64::from_bits(field_bits)
+        } else {
+            let v = js_object_get_field(src, i as u32);
+            f64::from_bits(v.bits())
+        };
         js_object_set_field_by_name(dst, key_ptr, field_f64);
     }
 }
@@ -2225,16 +2237,23 @@ pub unsafe extern "C" fn js_object_assign_one(target_f64: f64, source_f64: f64) 
     if !src_keys.is_null() && (src_keys as usize) >= 0x10000 {
         let key_count = crate::array::js_array_length(src_keys) as usize;
         let src_field_count = (*src).field_count as usize;
+        let alloc_limit = std::cmp::max(src_field_count, 8);
         let header_size = std::mem::size_of::<ObjectHeader>();
         let src_fields = (src as *const u8).add(header_size) as *const u64;
-        for i in 0..key_count.min(src_field_count) {
+        // Same overflow-aware iteration as `js_object_copy_own_fields`.
+        for i in 0..key_count {
             let key_val = crate::array::js_array_get(src_keys, i as u32);
             if !key_val.is_string() {
                 continue;
             }
             let key_ptr = key_val.as_string_ptr();
-            let field_bits = *src_fields.add(i);
-            let field_f64 = f64::from_bits(field_bits);
+            let field_f64 = if i < alloc_limit {
+                let field_bits = *src_fields.add(i);
+                f64::from_bits(field_bits)
+            } else {
+                let v = js_object_get_field(src, i as u32);
+                f64::from_bits(v.bits())
+            };
             js_object_set_field_by_name(target, key_ptr, field_f64);
         }
     }
