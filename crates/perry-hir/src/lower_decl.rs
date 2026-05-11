@@ -670,8 +670,20 @@ pub(crate) fn lower_class_decl(
             } else if let ast::Expr::Member(member) = super_class.as_ref() {
                 // Handle member expression like ethers.JsonRpcProvider or module.ClassName
                 let parent_name = extract_member_class_name(member);
-                // For member expressions, we don't have ClassId - just store the name
-                (None, Some(parent_name), None)
+                // Refs #488 drizzle-sqlite: also try resolving the parent
+                // class by name across modules. Pre-fix the Member arm set
+                // `extends = None`, so `class SQLiteIntegerBuilder extends
+                // import_mid.SQLiteColumnBuilder { ... }` lost its parent
+                // link entirely — inherited methods (drizzle's
+                // ColumnBuilder.setName etc.) were unreachable on instances.
+                // Class names are unique enough in practice that `lookup_class`
+                // resolves; if it doesn't, we fall back to the prior
+                // name-only behavior (no regression for unknown parents).
+                (
+                    ctx.lookup_class(&parent_name),
+                    Some(parent_name),
+                    None,
+                )
             } else {
                 (None, None, None)
             }
@@ -1569,8 +1581,16 @@ pub(crate) fn lower_class_from_ast(
                 (ctx.lookup_class(&parent_name), Some(parent_name), None)
             }
         } else if let ast::Expr::Member(member) = super_class.as_ref() {
+            // Refs #488 drizzle-sqlite: try cross-module class lookup. See
+            // the matching arm in `lower_class_decl` (above) for the full
+            // rationale — without this, the parent link is lost and
+            // inherited methods don't reach instances.
             let parent_name = extract_member_class_name(member);
-            (None, Some(parent_name), None)
+            (
+                ctx.lookup_class(&parent_name),
+                Some(parent_name),
+                None,
+            )
         } else {
             (None, None, None)
         }

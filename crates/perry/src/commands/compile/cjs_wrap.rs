@@ -115,6 +115,20 @@ pub(super) fn wrap_commonjs(source: &str, source_path: &Path) -> String {
     let (hoisted_class_block, hoisted_class_names, source_without_hoists) =
         extract_top_level_class_decls(source);
 
+    // Issue #665: when the CJS body assigns `module.exports = <Ident>` and
+    // `<Ident>` names a hoisted class, route the default export to the
+    // hoisted class binding directly instead of through `_cjs`. The IIFE
+    // still runs (side-effects and `exports.X = ...` keep their semantics),
+    // but `import X from "pkg"` resolves to the hoisted class declaration
+    // with all its methods on the prototype. Going through `_cjs` (whose
+    // declaration is `const _cjs = (function(){...})()` and whose value
+    // happens to be the class) loses class identity in HIR — instance
+    // methods come back `undefined`. This is the `module.exports = Class`
+    // + `extends` shape used by rate-limiter-flexible and most older
+    // npm-published CJS classes.
+    let default_export_identifier = extract_single_module_exports_assignment(source)
+        .filter(|name| hoisted_class_names.contains(name));
+
     let direct_class_exports = if hoisted_class_names.is_empty() {
         String::new()
     } else {
@@ -136,14 +150,74 @@ pub(super) fn wrap_commonjs(source: &str, source_path: &Path) -> String {
             .join("\n")
     };
 
+    // Refs #488 drizzle-sqlite: cross-file class inheritance bug.
+    // The hoisted class block runs at module scope (so consumers can
+    // `import { X } from "pkg"` and resolve to the real class), but the
+    // class body's `extends import_foo.Bar` / `static [import_baz.key] = …`
+    // references rely on the `var import_foo = require("./foo.cjs");`
+    // bindings that the original CJS source declares INSIDE the IIFE.
+    // Hoisting alone leaves `import_foo` undefined at the hoisted-class
+    // location, so the runtime sees `extends undefined.Bar` and the
+    // resulting class has no parent — every inherited method (drizzle's
+    // `ColumnBuilder.setName`, etc.) reads `undefined` on instances.
+    //
+    // Fix: surface each `var import_X = require("Y")` as a module-scope
+    // alias `const import_X = _req_N;` BEFORE the hoisted class block.
+    // We ALSO blank the original `var import_X = require(...)` inside the
+    // IIFE body so it doesn't shadow the module-scope alias when the IIFE
+    // evaluates — perry's resolver hits the inner `var` first under
+    // function scope and the hoisted class loses its parent again
+    // otherwise. The IIFE body's existing `import_X.Y` references still
+    // resolve via the outer `const import_X` through closure scope, so
+    // non-hoisted code paths are unaffected.
+    let (import_aliases, alias_strip_ranges) = if hoisted_class_block.is_empty() {
+        (String::new(), Vec::new())
+    } else {
+        let aliases = extract_require_aliases_with_ranges(source);
+        let lines = aliases
+            .iter()
+            .filter_map(|(alias, spec, _range)| {
+                require_specs
+                    .iter()
+                    .position(|s| s == spec)
+                    .map(|n| format!("const {} = _req_{};", alias, n))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let ranges = aliases
+            .into_iter()
+            .filter(|(_, spec, _)| require_specs.iter().any(|s| s == spec))
+            .map(|(_, _, range)| range)
+            .collect::<Vec<_>>();
+        (lines, ranges)
+    };
+
     let body_for_iife = if hoisted_class_block.is_empty() {
         source.to_string()
     } else {
-        source_without_hoists
+        // Start from the source with hoisted classes already blanked, then
+        // also blank the surfaced `var import_X = require(...)` lines so
+        // they don't shadow the module-scope aliases when the IIFE runs.
+        let mut s = source_without_hoists;
+        for (start, end) in alias_strip_ranges.into_iter().rev() {
+            let original = &source[start..end];
+            let blanked: String = original
+                .chars()
+                .map(|c| if c == '\n' { '\n' } else { ' ' })
+                .collect();
+            s.replace_range(start..end, &blanked);
+        }
+        s
     };
 
-    format!(
+    let default_export_decl = match &default_export_identifier {
+        Some(name) => format!("export default {};", name),
+        None => "export default _cjs;".to_string(),
+    };
+
+    let wrapped = format!(
         r#"{imports}
+{import_aliases}
 {hoisted_class_block}
 const _cjs = (function() {{
     const module = {{ exports: {{}} }};
@@ -158,11 +232,80 @@ const _cjs = (function() {{
     return module.exports;
 }})();
 
-export default _cjs;
+{default_export_decl}
 {direct_class_exports}
 {named_export_decls}
 "#
+    );
+    if std::env::var("PERRY_DEBUG_CJS_WRAP").is_ok() {
+        eprintln!(
+            "=== CJS WRAP for {} ===\n{}\n=== END ===",
+            source_path.display(),
+            wrapped
+        );
+    }
+    wrapped
+}
+
+/// Issue #665: detect `module.exports = <BareIdentifier>;` patterns. Returns
+/// `Some(name)` when at least one such assignment exists and every
+/// `module.exports = ...` assignment in the source targets the same bare
+/// identifier. Returns `None` if there are no such assignments, if multiple
+/// assignments disagree, or if any assignment is to a non-identifier (object
+/// literal, call, member expression, etc.) — those cases need the IIFE's
+/// `module.exports` machinery to resolve correctly.
+fn extract_single_module_exports_assignment(source: &str) -> Option<String> {
+    let re = regex::Regex::new(r#"(?m)^\s*module\.exports\s*=\s*([^;\n]+?)\s*;?\s*$"#).ok()?;
+    let ident_re = regex::Regex::new(r#"^[A-Za-z_$][A-Za-z0-9_$]*$"#).ok()?;
+    let mut found: Option<String> = None;
+    for cap in re.captures_iter(source) {
+        let rhs = cap.get(1)?.as_str().trim();
+        if !ident_re.is_match(rhs) {
+            return None;
+        }
+        match &found {
+            Some(prev) if prev != rhs => return None,
+            Some(_) => {}
+            None => found = Some(rhs.to_string()),
+        }
+    }
+    found
+}
+
+/// Refs #488 drizzle-sqlite: extract `var <alias> = require("<spec>");`
+/// declarations from the source as `(alias_name, spec, (start_byte,
+/// end_byte))`. The byte range covers the whole matched statement so
+/// `wrap_commonjs` can blank it from the IIFE body — leaving the binding
+/// only at module scope where the wrap emits `const <alias> = _req_N;`,
+/// so hoisted class declarations' `extends <alias>.Y` resolve correctly
+/// without the inner `var` re-binding shadowing the outer alias when the
+/// IIFE evaluates.
+///
+/// Matches `var` / `const` / `let`. Order is preserved and duplicates
+/// are dropped on the alias name (the first binding wins — matches JS
+/// hoisting semantics for the original source).
+fn extract_require_aliases_with_ranges(source: &str) -> Vec<(String, String, (usize, usize))> {
+    let re = regex::Regex::new(
+        r#"(?m)^\s*(?:var|const|let)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*require\s*\(\s*['"]([^'"]+)['"]\s*\)\s*;?"#,
     )
+    .unwrap();
+    let mut seen = Vec::new();
+    let mut out = Vec::new();
+    for cap in re.captures_iter(source) {
+        if let (Some(alias), Some(spec), Some(whole)) = (cap.get(1), cap.get(2), cap.get(0)) {
+            let alias = alias.as_str().to_string();
+            if seen.contains(&alias) {
+                continue;
+            }
+            seen.push(alias.clone());
+            out.push((
+                alias,
+                spec.as_str().to_string(),
+                (whole.start(), whole.end()),
+            ));
+        }
+    }
+    out
 }
 
 /// Issue #652: extract top-level `class X { ... }` declarations from the CJS
@@ -605,5 +748,93 @@ mod tests {
         let wrapped = wrap_commonjs(src, &PathBuf::from("/tmp/test.js"));
         assert!(wrapped.contains("import _req_0 from './dep';"));
         assert!(wrapped.contains("if (specifier === './dep') return _req_0;"));
+    }
+
+    #[test]
+    fn wrap_aliases_import_for_hoisted_class_extends_and_strips_iife_var() {
+        // Refs #488 drizzle-sqlite: hoisted `class B extends import_X.Y { }`
+        // needs `import_X` bound at module scope (not just inside the IIFE),
+        // AND the inner `var import_X = require("...")` must be stripped so
+        // it doesn't re-bind in IIFE scope and shadow the outer alias when
+        // the IIFE runs.
+        let src = "var import_dep = require(\"./dep.cjs\");\nclass B extends import_dep.A {\n  foo = 1;\n}\nexports.B = B;";
+        let wrapped = wrap_commonjs(src, &PathBuf::from("/tmp/test.js"));
+        let alias_pos = wrapped
+            .find("const import_dep = _req_0;")
+            .expect("module-scope alias missing");
+        let class_pos = wrapped
+            .find("class B extends import_dep.A")
+            .expect("hoisted class missing");
+        assert!(
+            alias_pos < class_pos,
+            "alias must precede hoisted class so `extends import_dep.A` resolves"
+        );
+        // Inner `var import_dep = require(...)` must NOT survive — otherwise
+        // it shadows the outer const inside the IIFE and re-breaks the
+        // hoisted class's parent link.
+        let var_count = wrapped
+            .matches("var import_dep = require(\"./dep.cjs\")")
+            .count();
+        assert_eq!(var_count, 0, "inner var declaration must be stripped");
+    }
+
+    #[test]
+    fn detects_single_module_exports_class_assignment() {
+        // Issue #665: rate-limiter-flexible shape.
+        let src = "class Child {}\nmodule.exports = Child;";
+        assert_eq!(
+            extract_single_module_exports_assignment(src),
+            Some("Child".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_object_literal_module_exports() {
+        let src = "module.exports = { foo: 1 };";
+        assert_eq!(extract_single_module_exports_assignment(src), None);
+    }
+
+    #[test]
+    fn rejects_member_expr_module_exports() {
+        let src = "module.exports = dep.value;";
+        assert_eq!(extract_single_module_exports_assignment(src), None);
+    }
+
+    #[test]
+    fn rejects_conflicting_module_exports_targets() {
+        let src = "module.exports = Foo;\nmodule.exports = Bar;";
+        assert_eq!(extract_single_module_exports_assignment(src), None);
+    }
+
+    #[test]
+    fn wrap_emits_direct_default_export_for_class_module_exports() {
+        // Issue #665: `module.exports = Child` + hoisted `class Child {...}`.
+        let src = "class Child { greet(){} }\nmodule.exports = Child;";
+        let wrapped = wrap_commonjs(src, &PathBuf::from("/tmp/test.js"));
+        assert!(
+            wrapped.contains("export default Child;"),
+            "expected direct default export of Child, got:\n{}",
+            wrapped
+        );
+        assert!(
+            !wrapped.contains("export default _cjs;"),
+            "should bypass _cjs for single-class module.exports, got:\n{}",
+            wrapped
+        );
+        assert!(wrapped.contains("export { Child };"));
+    }
+
+    #[test]
+    fn wrap_keeps_cjs_default_when_module_exports_is_object_literal() {
+        let src = "module.exports = { foo: 1, bar: 2 };";
+        let wrapped = wrap_commonjs(src, &PathBuf::from("/tmp/test.js"));
+        assert!(wrapped.contains("export default _cjs;"));
+    }
+
+    #[test]
+    fn wrap_keeps_cjs_default_when_module_exports_is_function_call() {
+        let src = "module.exports = makeThing();";
+        let wrapped = wrap_commonjs(src, &PathBuf::from("/tmp/test.js"));
+        assert!(wrapped.contains("export default _cjs;"));
     }
 }
