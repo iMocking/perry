@@ -1440,6 +1440,62 @@ object PerryBridge {
     }
 
     // ============================================================
+    // Issue #480 — TreeView (flat ListView with depth-aware adapter).
+    // ============================================================
+    //
+    // Rust owns the node graph; Kotlin only renders. `treeViewRefresh`
+    // receives a pre-flattened (rows, ids) pair where `rows` contain the
+    // already-indented strings ("    ▾ Label") and `ids` are the parallel
+    // node IDs. OnItemClickListener forwards the tapped id back to Rust
+    // via `nativeTreeRowTapped(widgetHandle, id)`, which both toggles
+    // expand/collapse state and fires the user on_select closure.
+
+    private val treeViewAdapters = mutableMapOf<android.widget.ListView, ArrayAdapter<String>>()
+    private val treeViewIds = mutableMapOf<android.widget.ListView, Array<String>>()
+
+    @JvmStatic
+    fun treeViewCreate(callbackKey: Long): android.widget.ListView {
+        val lv = android.widget.ListView(activity)
+        val adapter = ArrayAdapter<String>(
+            activity,
+            android.R.layout.simple_list_item_1,
+            mutableListOf<String>()
+        )
+        lv.adapter = adapter
+        treeViewAdapters[lv] = adapter
+        // OnItemClickListener fires regardless of callbackKey because we
+        // still need to drive the local expand/collapse state machine.
+        lv.setOnItemClickListener { _, _, position, _ ->
+            val ids = treeViewIds[lv] ?: return@setOnItemClickListener
+            if (position in ids.indices) {
+                // `widgetHandle` is encoded as the ListView's tag (set by
+                // treeViewRefresh below) so we can route the tap back to
+                // the right Rust TreeViewState.
+                val handle = (lv.tag as? Long) ?: 0L
+                nativeTreeRowTapped(handle, ids[position])
+            }
+        }
+        return lv
+    }
+
+    @JvmStatic
+    fun treeViewRefresh(
+        widgetHandle: Long,
+        lv: android.widget.ListView,
+        rows: Array<String>,
+        ids: Array<String>
+    ) {
+        uiHandler.post {
+            lv.tag = widgetHandle
+            treeViewIds[lv] = ids
+            val adapter = treeViewAdapters[lv] ?: return@post
+            adapter.clear()
+            adapter.addAll(rows.toList())
+            adapter.notifyDataSetChanged()
+        }
+    }
+
+    // ============================================================
     // Issue #479 — RichTooltip (long-press PopupWindow).
     // ============================================================
     //
@@ -1526,6 +1582,10 @@ object PerryBridge {
 
     @JvmStatic
     external fun nativeInvokeCallbackWithStringArray(key: Long, paths: Array<String>)
+
+    // Issue #480 — TreeView row-tap callback.
+    @JvmStatic
+    external fun nativeTreeRowTapped(widgetHandle: Long, id: String)
 
     @JvmStatic
     external fun nativeFileDialogResult(key: Long, content: String?)
