@@ -27,8 +27,8 @@ thread_local! {
     /// directly, not the GC arena), so the box pointer is never marked
     /// AND the f64 value inside is never scanned — heap objects
     /// referenced only through box-captures can be swept mid-await.
-    pub(crate) static BOX_REGISTRY: std::cell::RefCell<std::collections::HashSet<usize>> =
-        std::cell::RefCell::new(std::collections::HashSet::new());
+    pub(crate) static BOX_REGISTRY: std::cell::RefCell<crate::fast_hash::PtrHashSet<usize>> =
+        std::cell::RefCell::new(crate::fast_hash::new_ptr_hash_set());
 }
 
 /// Allocate a new box with an initial value
