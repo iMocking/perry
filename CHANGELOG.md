@@ -2,6 +2,76 @@
 
 Detailed changelog for Perry. See CLAUDE.md for concise summaries.
 
+## v0.5.801 — fix(codegen): closes #671 — value-position namespace member access invokes function decls instead of returning their handle
+
+**Symptom**: `import {} from "effect"` (Effect framework, ESM) compiled+linked clean
+but threw `TypeError: value is not a function` during pre-`main` module init,
+specifically the 26th `__init` call from `_main` — `effect/src/HashMap.ts__init`.
+The throw bubbled out of `js_closure_call1` via `throw_not_callable`
+(`crates/perry-runtime/src/closure.rs:774`), which fires when the closure
+pointer handed to `js_closure_callN` fails `get_valid_func_ptr` (null /
+0x0…0000 / out of code range).
+
+**Root cause** (`crates/perry-codegen/src/expr.rs:3580` —
+`PropertyGet` lowering of namespace member access): when a value-position
+expression like `const X = NS.X` (where `NS` is a `import * as NS from …`
+namespace and `X` is an exported binding from the source module), the lowering
+unconditionally emitted `bl perry_fn_<src>__<X>()` — a zero-arg call to the
+source's wrapper symbol. That symbol is a 3-instruction trivial getter for
+`let`/`const`-bound exports (loads the module global and returns it), and
+calling it with zero args correctly returns the closure's NaN-boxed value.
+But for `export function X(...)` declarations, perry's codegen makes
+`perry_fn_<src>__<X>` the *function body itself*, not a getter — so calling
+it with zero args invokes the function with garbage in the arg registers,
+returning the body's result instead of a closure handle bound to the
+function. The two existing call sites that already make this distinction
+(`Expr::ExternFuncRef` lowering at `expr.rs:10432` and the namespace member
+*call* path at `lower_call.rs:547`) consult `imported_vars` to discriminate
+vars from function decls; the namespace member *value* path at `expr.rs:3580`
+did not.
+
+**Concrete failure path** (Effect's `HashMap.ts` line 364):
+
+```ts
+export const keySet: <K, V>(self: HashMap<K, V>) => HashSet<K> = keySet_.keySet
+```
+
+`keySet` is `export function keySet(self) { return makeImpl(self) }` in
+`internal/hashMap/keySet.ts`. Pre-fix `HashMap.ts__init` emitted
+`bl perry_fn_..._keySet` at the source-relative offset HashMap.ts__init+0x29c
+— invoking the keySet function body with no args. The body called
+`makeImpl(undefined)`, where `makeImpl` is an imported var from
+`internal/hashSet.ts` reached via `bl perry_fn_internal_hashSet_ts__makeImpl`
+(its trivial getter). But the topo-sorted module init order ran `HashMap.ts`
+*before* `internal/hashSet.ts` (perry's DFS walk; hashSet was at position 26,
+HashMap at 25), so the makeImpl global was still 0.0 (uninitialized); the
+0.0 was extracted as a closure pointer and handed to `js_closure_call1`,
+which validated it as out-of-range and threw via `throw_not_callable`.
+
+**Fix**: mirror the var-vs-func split from `Expr::ExternFuncRef` at the
+namespace member access path. If `property` is in `imported_vars`, keep the
+existing zero-arg getter call (correct for `let`/`const` exports). Otherwise
+(it's a function declaration), emit
+`js_closure_alloc_singleton(@__perry_wrap_perry_fn_<src>__<property>)` and
+NaN-box the resulting closure handle — same singleton-allocation path the
+source module's own `Expr::FuncRef(id)` value-reads use, so the consumer
+receives the same `ClosureHeader*` pointer the source sees (uniformity
+matters for `js_closure_dynamic_props`-keyed IIFE patterns; refs #645
+cross-module IIFE rationale at `expr.rs:10437`). The `__perry_wrap_*`
+wrapper is emitted unconditionally for every user function at
+`crates/perry-codegen/src/codegen.rs:2280`, so the symbol always exists.
+
+**Validation**: `import {} from "effect"` no longer throws during
+HashMap.ts__init. Compilation/linking still clean; binary boots into main
+just like pre-fix. The Effect end-to-end DoD (#321) is *not yet* satisfied
+— after #671, init advances to `internal/tracer.ts__init` (the 75th call)
+where it hits a different blocker: `Context.Reference()(...)` runs at
+tracer.ts top-level but `internal/tracer.ts` initializes *before* `Context.ts`
+in the topo order (Context is at position 259), so Context's per-module
+globals are still 0.0 when tracer reads them. That's a circular-import /
+init-order issue, not a codegen value-vs-call confusion, and is filed as a
+follow-up.
+
 ## v0.5.800 — Completes #665 (CJS default-imported class): the v0.5.798 changelog entry described the full three-piece fix but only the `cjs_wrap.rs` piece had landed (folded into v0.5.797's commit). This version lands the two missing pieces — HIR `ExportDefaultExpr` ClassRef arm + importer `imported_classes` exported-name alias — so the end-to-end path actually works on this commit.
 
 **HIR fix** (`crates/perry-hir/src/lower.rs`, `ExportDefaultExpr` arm). Adds a `Expr::ClassRef` branch between the existing `FuncRef` and catch-all arms. When `export default <ClassName>` lowers `<ClassName>` to `Expr::ClassRef("Child")`, push `Export::Named { local: class_name, exported: "default" }` AND flip `class.is_exported = true` (the latter mirrors v0.5.577's #482 fix for `export { Foo }` re-export clauses). Without this, the catch-all branch created a synthetic `default` Any-typed module-local whose value happened to be the class but whose class identity HIR lost.

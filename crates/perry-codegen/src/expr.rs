@@ -3579,9 +3579,65 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     }
                     if let Some(source_prefix) = ctx.import_function_prefixes.get(property).cloned()
                     {
-                        let getter = format!("perry_fn_{}__{}", source_prefix, property);
-                        ctx.pending_declares.push((getter.clone(), DOUBLE, vec![]));
-                        return Ok(ctx.block().call(DOUBLE, &getter, &[]));
+                        // Issue #671: distinguish exported VARIABLES from
+                        // exported FUNCTIONS — for variables, the symbol
+                        // `perry_fn_<src>__<prop>` is a trivial getter that
+                        // returns the global's value, so calling it with no
+                        // args is correct. For functions, `perry_fn_<src>__<prop>`
+                        // IS the function body itself; calling it with no args
+                        // INVOKES the function (with whatever happened to be in
+                        // the arg registers) and returns its result instead of
+                        // the function value. Mirrors the var-vs-func split
+                        // already used by `Expr::ExternFuncRef` lowering at the
+                        // bottom of this function (the `imported_vars` arm at
+                        // line ~10432) and by `lower_call.rs:547`'s namespace-
+                        // member-CALL path.
+                        //
+                        // Concrete failure pre-fix (#671): Effect's `HashMap.ts`
+                        // top-level binds `keySet = keySet_.keySet`. `keySet`
+                        // is an exported `function` declaration in
+                        // `internal/hashMap/keySet.ts`, so this arm emitted
+                        // `bl perry_fn_..._keySet()` — invoking the keySet
+                        // function body with no args during HashMap.ts__init.
+                        // The body called `makeImpl` (an imported var from
+                        // `internal/hashSet.ts`); with HashMap.ts initialized
+                        // before hashSet.ts in the topo order, makeImpl's
+                        // global was still 0.0. The 0.0 was handed to
+                        // `js_closure_call1` as the closure pointer, tripping
+                        // `throw_not_callable` with the literal `value is not
+                        // a function`. The fix routes function-shaped namespace
+                        // members through `js_closure_alloc_singleton` against
+                        // the source's `__perry_wrap_perry_fn_<src>__<prop>`
+                        // wrapper — same path the source module's own
+                        // `Expr::FuncRef(id)` value-reads use, so the consumer
+                        // gets a stable closure handle without invoking the
+                        // body. The body only runs later when the consumer
+                        // actually calls `HashMap.keySet(self)`, by which time
+                        // both modules have finished `__init`.
+                        if ctx.imported_vars.contains(property) {
+                            let getter = format!("perry_fn_{}__{}", source_prefix, property);
+                            ctx.pending_declares.push((getter.clone(), DOUBLE, vec![]));
+                            return Ok(ctx.block().call(DOUBLE, &getter, &[]));
+                        }
+                        let target_name = format!("perry_fn_{}__{}", source_prefix, property);
+                        let wrap_name = format!("__perry_wrap_{}", target_name);
+                        let param_count = ctx
+                            .imported_func_param_counts
+                            .get(property)
+                            .copied()
+                            .unwrap_or(0)
+                            .min(5);
+                        let mut wrap_param_types: Vec<crate::types::LlvmType> = vec![I64];
+                        for _ in 0..param_count {
+                            wrap_param_types.push(DOUBLE);
+                        }
+                        ctx.pending_declares
+                            .push((wrap_name.clone(), DOUBLE, wrap_param_types));
+                        let blk = ctx.block();
+                        let wrap_ptr = format!("@{}", wrap_name);
+                        let closure_handle =
+                            blk.call(I64, "js_closure_alloc_singleton", &[(PTR, &wrap_ptr)]);
+                        return Ok(nanbox_pointer_inline(blk, &closure_handle));
                     }
                 }
             }
