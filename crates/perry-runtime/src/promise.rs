@@ -2243,6 +2243,16 @@ pub extern "C" fn js_promise_any(promises_arr: *const crate::array::ArrayHeader)
     js_array_set_f64(state_arr, 0, count as f64);
     js_array_set_f64(state_arr, 1, 0.0);
 
+    // Fulfill closure captures only `[result_promise, state_arr]` — no
+    // per-index payload, so we share one across all N inputs (mirrors
+    // the Promise.all reject-closure sharing in commit 7c89fcc6).
+    // Reject still needs per-index since it must write its error into
+    // the correct slot of `errors_arr` for the eventual AggregateError.
+    let shared_fulfill =
+        js_closure_alloc(promise_any_fulfill_handler as *const u8, 2);
+    js_closure_set_capture_ptr(shared_fulfill, 0, result_promise as i64);
+    js_closure_set_capture_ptr(shared_fulfill, 1, state_arr as i64);
+
     for i in 0..count {
         let promise_f64 = js_array_get_f64(promises_arr, i);
         // Discriminate via GC-header obj_type — string/bigint NaN-boxed
@@ -2259,17 +2269,13 @@ pub extern "C" fn js_promise_any(promises_arr: *const crate::array::ArrayHeader)
         }
         let promise_ptr = js_nanbox_get_pointer(promise_f64) as *mut Promise;
 
-        let fulfill_closure = js_closure_alloc(promise_any_fulfill_handler as *const u8, 2);
-        js_closure_set_capture_ptr(fulfill_closure, 0, result_promise as i64);
-        js_closure_set_capture_ptr(fulfill_closure, 1, state_arr as i64);
-
         let reject_closure = js_closure_alloc(promise_any_reject_handler as *const u8, 4);
         js_closure_set_capture_ptr(reject_closure, 0, result_promise as i64);
         js_closure_set_capture_ptr(reject_closure, 1, errors_arr as i64);
         js_closure_set_capture_ptr(reject_closure, 2, state_arr as i64);
         js_closure_set_capture_f64(reject_closure, 3, i as f64);
 
-        js_promise_attach_handlers(promise_ptr, fulfill_closure, reject_closure);
+        js_promise_attach_handlers(promise_ptr, shared_fulfill, reject_closure);
     }
 
     result_promise
