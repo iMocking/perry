@@ -1828,7 +1828,7 @@ pub extern "C" fn js_array_values(arr: *const ArrayHeader) -> *mut ArrayHeader {
 // These use closure pointers to call the callback function
 // ============================================================================
 
-use crate::closure::{js_closure_call2, ClosureHeader};
+use crate::closure::{js_closure_call2, js_closure_call3, ClosureHeader};
 
 /// forEach - call callback(element, index) for each element
 /// Returns nothing (void)
@@ -2374,7 +2374,18 @@ pub extern "C" fn js_array_reduce(
 
         for i in start_idx..length as usize {
             let element = *elements_ptr.add(i);
-            accumulator = js_closure_call2(callback, accumulator, element);
+            // Refs #488 drizzle-sqlite: spec says callback is
+            // `(accumulator, currentValue, currentIndex, array)`. Pre-fix
+            // we only passed 2 args, so callbacks like drizzle's
+            // `mapResultRow`'s `(result, {path, field}, columnIndex)` got
+            // `columnIndex === undefined` and ended up reading `row[undefined]`
+            // (which perry returns as `row[0]`) — every column projection
+            // collapsed onto the first column's value (alice.age = 1
+            // instead of 30). We now pass the index as the 3rd arg.
+            // (The 4th `array` arg is intentionally omitted — drizzle and
+            // most real callbacks ignore it; adding it would require a
+            // call4 path and another NaN-box of the array handle.)
+            accumulator = js_closure_call3(callback, accumulator, element, i as f64);
         }
 
         accumulator
@@ -2582,7 +2593,9 @@ pub extern "C" fn js_array_reduce_right(
         if start_idx > 0 {
             for i in (0..start_idx).rev() {
                 let element = *elements_ptr.add(i);
-                accumulator = js_closure_call2(callback, accumulator, element);
+                // Refs #488: pass index as 3rd arg to match spec
+                // `(accumulator, currentValue, currentIndex, array)`.
+                accumulator = js_closure_call3(callback, accumulator, element, i as f64);
             }
         }
 

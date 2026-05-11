@@ -2,6 +2,30 @@
 
 Detailed changelog for Perry. See CLAUDE.md for concise summaries.
 
+## v0.5.805 — **Closes #488 — drizzle-sqlite acceptance** (`tests/release/packages/drizzle-sqlite/fixture.sh` reports `PASS drizzle-sqlite` byte-identical to expected).
+
+**Final blocker fixed**: `Array.prototype.reduce` / `reduceRight` callbacks were called with only 2 args `(accumulator, currentValue)` instead of the spec's `(accumulator, currentValue, currentIndex, array)`. Drizzle's `mapResultRow` in `node_modules/drizzle-orm/utils.js` uses `columns.reduce((result, { path, field }, columnIndex) => { ... row[columnIndex] ... }, {})` — pre-fix `columnIndex === undefined`, so `row[undefined]` was read for every column (perry returns `row[0]` for that), every column projection collapsed onto the id column. SELECT returned the right row count but `alice.age = 1` (the id) instead of `30`.
+
+**Fix** in `crates/perry-runtime/src/array.rs:2377` + `:2598` — `js_closure_call2(callback, accumulator, element)` → `js_closure_call3(callback, accumulator, element, i as f64)`. The 4th `array` arg is intentionally omitted (drizzle and most real callbacks ignore it; adding it would require a call4 path + an extra NaN-box of the array handle — separate followup if anything needs it).
+
+**Drizzle-sqlite full path (v0.5.789 → v0.5.797 → v0.5.799 → v0.5.803 → v0.5.805) now passes byte-identical to expected.txt**:
+```
+count=3
+alice.age=30
+```
+
+**Validation**:
+- `tests/release/packages/drizzle-sqlite/fixture.sh`: `PASS drizzle-sqlite`.
+- New regression `test-files/test_issue_488_reduce_index.ts` covers index-using reduce + reduceRight + the drizzle-mapResultRow-shape callback. Byte-identical to Node.
+- 10/10 class/array regression tests still byte-identical to Node.
+
+**Cumulative #488 fixes this cycle**:
+- v0.5.789 — HIR default-arg fill positional bug (`tableBase(name, columns, extraConfig?, schema?, baseName=name)` no longer puts baseName default into schema slot; killed the doubled `"users"."users"` schema-prefix symptom).
+- v0.5.797 — cross-file class inheritance for CJS (`extends import_X.Y` arm in HIR + cjs_wrap surfaces `import_X` to module scope + strips inner `var` to avoid shadowing). drizzle's column-builder chain (`SQLiteIntegerBuilder → SQLiteBaseIntegerBuilder → SQLiteColumnBuilder → ColumnBuilder`) now walks correctly; `integer("id").setName` resolves.
+- v0.5.799 — computed-key `{ [this.X]: true }` IIFE wrapper now captures `this`. drizzle's `SQLiteSelectQueryBuilderBase` ctor (`this.joinsNotNullableMap = typeof this.tableName === "string" ? { [this.tableName]: true } : {}`) completes instead of throwing `Cannot read properties of undefined (reading 'tableName')`.
+- v0.5.803 — `arr.push(...src)` on a property receiver now actually pushes. drizzle's `mergeQueries` does `result.params.push(...query.params)` — pre-fix this was a silent no-op and SQL went out with 0 bound params, 0 rows inserted, `count=0`. New `js_array_push_spread_f64` runtime helper + codegen arm.
+- v0.5.805 — Array.reduce passes the index arg. drizzle's `mapResultRow` callback now sees `columnIndex` instead of `undefined`; column projection lines up with the row.
+
 ## v0.5.804 — Closes #667, #668, #672: AOT fixes for `__dirname`, `require()`, and rest-param cross-module dispatch.
 
 **Symptom #667.** Under `perry compile`, bare `__dirname` (and `__filename`) evaluated to the number `0` instead of the source file's directory string. Found while running the `@perryts/redis` benchmark harness — `path.join(__dirname, 'results')` produced `'0/results'`, which `mkdirSync` happily created against `cwd`, so the bench output landed in the wrong place. **Root cause.** The `ast::Expr::Ident` arm in `crates/perry-hir/src/lower.rs::lower_expr` had no entry for `__dirname` / `__filename` — both names fell through every special-case branch (`undefined` / `null` / `NaN` / `Infinity` / global-whitelist) into the unknown-identifier sentinel `Expr::GlobalGet(0)`. `GlobalGet(0)` lowers to the numeric literal `0.0`, which is why `typeof __dirname` came back as `"number"`. The companion `import.meta.dirname` arm in `expr_misc.rs::import_meta_paths` already had the correct logic — derive from `ctx.source_file_path` — but it was only reachable via the `import.meta.X` member-access path, not the bare CJS-style names. **Fix.** New arm in the Ident fallthrough sequence (slotted between `Infinity` and the unknown-ident warning) that returns `Expr::String(ctx.source_file_path)` for `__filename` and `Expr::String(parent_of(source_file_path))` for `__dirname`. Mirrors `import_meta_paths` exactly so both surfaces agree on the same `(filename, dirname)` derivation, and runs at lower time (zero runtime cost). Guard order matters — `lookup_local` runs before this arm, so a user-declared `let __dirname = X` still shadows the synthesized binding.
