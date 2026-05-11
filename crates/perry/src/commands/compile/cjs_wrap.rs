@@ -58,17 +58,91 @@ pub(super) fn is_commonjs(source: &str) -> bool {
 pub(super) fn wrap_commonjs(source: &str, source_path: &Path) -> String {
     let require_specs = extract_require_specifiers(source);
 
-    let imports = require_specs
+    // Issue #652: hoist top-level `class X { ... }` declarations OUT of the
+    // IIFE so the consumer's `import { X } from "pkg"` resolves to the real
+    // class instead of a runtime property access on `_cjs.X`.
+    //
+    // Pre-fix the cjs_wrap left every class inside the IIFE body. Perry's
+    // HIR then sees `MiniPool` as `exported: false` (it's nested in a
+    // closure body), and the consumer-side resolver couldn't find the
+    // class. Calling `new MiniPool(...)` produced an empty instance with
+    // no fields and no methods — typeof p.query was undefined, p.url was
+    // undefined.
+    //
+    // The hoisted classes still get `exports.X = X` set inside the IIFE
+    // body, so the default-export `_cjs` shape (`_cjs.X`) keeps working.
+    // We replace the hoisted-class names in `named_exports` with direct
+    // re-exports `export { X }` instead of `export const X = _cjs.X`,
+    // so the import resolves to the class declaration directly.
+    let (hoisted_class_block, hoisted_class_names, source_without_hoists) =
+        extract_top_level_class_decls(source);
+
+    // Issue #665 (third pass): for each spec that has a unique CJS-side alias
+    // `var/const/let X = require('Y')`, use X as the import local name instead
+    // of `_req_N`. This lets compile.rs propagate class identity for X — the
+    // default-import handler registers `imported_class_ctors[X]`, and the
+    // codegen super-call dispatch at expr.rs:5094 then resolves a child
+    // class's `extends X` to the source module's standalone constructor.
+    //
+    // Without this, the wrap surfaced the alias only as a module-scope
+    // `const X = _req_N;`, which HIR sees as a plain Let aliasing an import
+    // — class identity for X is lost, so `class Child extends X { ctor(){
+    // super(o) } }` silently no-ops the parent constructor (the
+    // rate-limiter-flexible RateLimiterMemory ← RateLimiterAbstract shape).
+    //
+    // We only swap the import local name when the alias is "safe": a valid
+    // identifier that won't collide with the wrap's own bindings (`_cjs`,
+    // `module`, `exports`, `require`, `_req_*`) or with a hoisted class
+    // name. The first alias for each spec wins; subsequent aliases of the
+    // same spec keep their `const X = <chosen>;` form (handled below).
+    let raw_aliases = extract_require_aliases_with_ranges(source);
+    let alias_is_safe = |alias: &str| -> bool {
+        if alias.starts_with("_req_") {
+            return false;
+        }
+        if matches!(alias, "_cjs" | "module" | "exports" | "require") {
+            return false;
+        }
+        if hoisted_class_names.iter().any(|c| c == alias) {
+            return false;
+        }
+        true
+    };
+    let mut import_local_names: Vec<String> = require_specs
         .iter()
         .enumerate()
-        .map(|(i, spec)| format!("import _req_{} from '{}';", i, spec))
+        .map(|(i, _)| format!("_req_{}", i))
+        .collect();
+    let mut chosen_alias_per_spec: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    for (alias, spec, _) in &raw_aliases {
+        if !alias_is_safe(alias) {
+            continue;
+        }
+        if import_local_names.iter().any(|n| n == alias) {
+            continue;
+        }
+        let Some(idx) = require_specs.iter().position(|s| s == spec) else {
+            continue;
+        };
+        if chosen_alias_per_spec.contains(spec) {
+            continue;
+        }
+        import_local_names[idx] = alias.clone();
+        chosen_alias_per_spec.insert(spec.clone());
+    }
+
+    let imports = require_specs
+        .iter()
+        .zip(import_local_names.iter())
+        .map(|(spec, local)| format!("import {} from '{}';", local, spec))
         .collect::<Vec<_>>()
         .join("\n");
 
     let require_cases = require_specs
         .iter()
-        .enumerate()
-        .map(|(i, spec)| format!("        if (specifier === '{}') return _req_{};", spec, i))
+        .zip(import_local_names.iter())
+        .map(|(spec, local)| format!("        if (specifier === '{}') return {};", spec, local))
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -95,25 +169,6 @@ pub(super) fn wrap_commonjs(source: &str, source_path: &Path) -> String {
             }
         }
     }
-
-    // Issue #652: hoist top-level `class X { ... }` declarations OUT of the
-    // IIFE so the consumer's `import { X } from "pkg"` resolves to the real
-    // class instead of a runtime property access on `_cjs.X`.
-    //
-    // Pre-fix the cjs_wrap left every class inside the IIFE body. Perry's
-    // HIR then sees `MiniPool` as `exported: false` (it's nested in a
-    // closure body), and the consumer-side resolver couldn't find the
-    // class. Calling `new MiniPool(...)` produced an empty instance with
-    // no fields and no methods — typeof p.query was undefined, p.url was
-    // undefined.
-    //
-    // The hoisted classes still get `exports.X = X` set inside the IIFE
-    // body, so the default-export `_cjs` shape (`_cjs.X`) keeps working.
-    // We replace the hoisted-class names in `named_exports` with direct
-    // re-exports `export { X }` instead of `export const X = _cjs.X`,
-    // so the import resolves to the class declaration directly.
-    let (hoisted_class_block, hoisted_class_names, source_without_hoists) =
-        extract_top_level_class_decls(source);
 
     // Issue #665: when the CJS body assigns `module.exports = <Ident>` and
     // `<Ident>` names a hoisted class, route the default export to the
@@ -182,7 +237,7 @@ pub(super) fn wrap_commonjs(source: &str, source_path: &Path) -> String {
                 require_specs
                     .iter()
                     .position(|s| s == spec)
-                    .map(|n| format!("export {{ _req_{} as {} }};", n, name))
+                    .map(|n| format!("export {{ {} as {} }};", import_local_names[n], name))
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -231,10 +286,17 @@ pub(super) fn wrap_commonjs(source: &str, source_path: &Path) -> String {
         let lines = aliases
             .iter()
             .filter_map(|(alias, spec, _range)| {
-                require_specs
-                    .iter()
-                    .position(|s| s == spec)
-                    .map(|n| format!("const {} = _req_{};", alias, n))
+                let idx = require_specs.iter().position(|s| s == spec)?;
+                // When the alias is already the spec's import local name
+                // (Issue #665 third pass: we renamed `_req_N` → alias upstream
+                // so class-identity propagation works), the const would
+                // redeclare the import — skip. Otherwise emit the const so
+                // subsequent aliases of the same spec keep their binding.
+                if import_local_names[idx] == *alias {
+                    None
+                } else {
+                    Some(format!("const {} = {};", alias, import_local_names[idx]))
+                }
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -1088,10 +1150,36 @@ mod tests {
 
     #[test]
     fn wrap_hoists_require_as_import() {
+        // Issue #665 (third pass): when the CJS source has a unique alias
+        // `var dep = require('./dep')`, the wrap uses the alias name as the
+        // import local so compile.rs propagates class identity for `dep`.
+        // The `_req_0` placeholder only appears when no safe alias is found.
         let src = "var dep = require('./dep'); module.exports = dep.value;";
         let wrapped = wrap_commonjs(src, &PathBuf::from("/tmp/test.js"));
-        assert!(wrapped.contains("import _req_0 from './dep';"));
-        assert!(wrapped.contains("if (specifier === './dep') return _req_0;"));
+        assert!(
+            wrapped.contains("import dep from './dep';"),
+            "expected import using alias name, got:\n{}",
+            wrapped
+        );
+        assert!(
+            wrapped.contains("if (specifier === './dep') return dep;"),
+            "expected require dispatch through aliased import, got:\n{}",
+            wrapped
+        );
+    }
+
+    #[test]
+    fn wrap_falls_back_to_req_n_when_alias_unsafe() {
+        // Reserved internal names (`_cjs`, `module`, `exports`, `require`)
+        // and `_req_<N>` aliases must not become import locals — fall back
+        // to the auto-generated `_req_N` instead.
+        let src = "var _cjs = require('./a'); module.exports = 1;";
+        let wrapped = wrap_commonjs(src, &PathBuf::from("/tmp/test.js"));
+        assert!(
+            wrapped.contains("import _req_0 from './a';"),
+            "expected _req_0 fallback when alias collides with wrap internals, got:\n{}",
+            wrapped
+        );
     }
 
     #[test]
@@ -1101,20 +1189,26 @@ mod tests {
         // AND the inner `var import_X = require("...")` must be stripped so
         // it doesn't re-bind in IIFE scope and shadow the outer alias when
         // the IIFE runs.
+        //
+        // Issue #665 (third pass): the alias `import_dep` is now used as
+        // the import local name directly (`import import_dep from "./dep.cjs"`),
+        // so the separate `const import_dep = _req_N;` line is no longer
+        // needed. The hoisted class's `extends import_dep.A` still resolves
+        // because `import_dep` is a module-scope binding.
         let src = "var import_dep = require(\"./dep.cjs\");\nclass B extends import_dep.A {\n  foo = 1;\n}\nexports.B = B;";
         let wrapped = wrap_commonjs(src, &PathBuf::from("/tmp/test.js"));
-        let alias_pos = wrapped
-            .find("const import_dep = _req_0;")
-            .expect("module-scope alias missing");
+        let import_pos = wrapped
+            .find("import import_dep from './dep.cjs';")
+            .expect("module-scope import using alias name missing");
         let class_pos = wrapped
             .find("class B extends import_dep.A")
             .expect("hoisted class missing");
         assert!(
-            alias_pos < class_pos,
-            "alias must precede hoisted class so `extends import_dep.A` resolves"
+            import_pos < class_pos,
+            "alias-as-import must precede hoisted class so `extends import_dep.A` resolves"
         );
         // Inner `var import_dep = require(...)` must NOT survive — otherwise
-        // it shadows the outer const inside the IIFE and re-breaks the
+        // it shadows the outer import inside the IIFE and re-breaks the
         // hoisted class's parent link.
         let var_count = wrapped
             .matches("var import_dep = require(\"./dep.cjs\")")
@@ -1302,17 +1396,22 @@ mod tests {
 
     #[test]
     fn wrap_emits_direct_reexport_for_object_literal_aggregator() {
+        // Issue #665: each alias is now also the import local (third pass
+        // rename — needed so `class … extends RateLimiterMemory` in the
+        // consumer picks up class identity via compile.rs's default-import
+        // handler). The re-export targets the same name, so `<alias> as
+        // <name>` is `RateLimiterMemory as RateLimiterMemory`.
         let src = "const RateLimiterMemory = require('./lib/RateLimiterMemory');\n\
                    const RateLimiterRedis = require('./lib/RateLimiterRedis');\n\
                    module.exports = { RateLimiterMemory, RateLimiterRedis };";
         let wrapped = wrap_commonjs(src, &PathBuf::from("/tmp/test.js"));
         assert!(
-            wrapped.contains("export { _req_0 as RateLimiterMemory };"),
+            wrapped.contains("export { RateLimiterMemory as RateLimiterMemory };"),
             "expected direct re-export of RateLimiterMemory, got:\n{}",
             wrapped
         );
         assert!(
-            wrapped.contains("export { _req_1 as RateLimiterRedis };"),
+            wrapped.contains("export { RateLimiterRedis as RateLimiterRedis };"),
             "expected direct re-export of RateLimiterRedis, got:\n{}",
             wrapped
         );
