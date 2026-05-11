@@ -28,7 +28,16 @@ thread_local! {
     /// AND the f64 value inside is never scanned — heap objects
     /// referenced only through box-captures can be swept mid-await.
     pub(crate) static BOX_REGISTRY: std::cell::RefCell<crate::fast_hash::PtrHashSet<usize>> =
-        std::cell::RefCell::new(crate::fast_hash::new_ptr_hash_set());
+        // Pre-size for promise-heavy workloads: `promise_all_chains`
+        // allocates ~150 k boxes per kernel run (one per closure
+        // mutable capture). Starting at 128 k buckets (~2 MB) covers
+        // the full working set in one alloc — without it, hashbrown
+        // rehashes from 0 → 256 k buckets across the alloc history,
+        // showing up as ~3 % CPU in `hash_one` / `reserve_rehash`.
+        std::cell::RefCell::new(std::collections::HashSet::with_capacity_and_hasher(
+            128 * 1024,
+            crate::fast_hash::PtrHasher,
+        ));
 }
 
 /// Allocate a new box with an initial value

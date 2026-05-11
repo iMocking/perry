@@ -11,8 +11,11 @@ use std::collections::HashMap;
 thread_local! {
     /// Singleton cache keyed by `func_ptr` for non-capturing closures.
     /// See `js_closure_alloc_singleton` and `snapshot_singleton_closures`.
-    static SINGLETON_CLOSURES: RefCell<HashMap<usize, *mut ClosureHeader>> =
-        RefCell::new(HashMap::new());
+    /// Pointer-keyed; uses `PtrHasher` (Fibonacci-multiplicative) to
+    /// skip SipHash's per-byte cost — the function-pointer keys never
+    /// come from external input and are already ~uniformly distributed.
+    static SINGLETON_CLOSURES: RefCell<crate::fast_hash::PtrHashMap<usize, *mut ClosureHeader>> =
+        RefCell::new(crate::fast_hash::new_ptr_hash_map());
 
     /// Per-`func_ptr` single-slot cache for closures with captures.
     /// Each value is `(last_captures, last_closure)` — when the same
@@ -33,8 +36,11 @@ thread_local! {
     /// async-await pattern (e.g. `Promise.all` of N async closures
     /// each capturing its own boxed `__async_step`), where a single-
     /// slot cache evicts every cycle and effectively never hits.
-    static SINGLETON_CAPTURED_CLOSURES: RefCell<HashMap<usize, Vec<(Vec<u64>, *mut ClosureHeader)>>> =
-        RefCell::new(HashMap::new());
+    /// `PtrHasher`-keyed for the same reason as the other registries
+    /// here — on `promise_all_chains` this is hit on every closure
+    /// alloc (150 k/run).
+    static SINGLETON_CAPTURED_CLOSURES: RefCell<crate::fast_hash::PtrHashMap<usize, Vec<(Vec<u64>, *mut ClosureHeader)>>> =
+        RefCell::new(crate::fast_hash::new_ptr_hash_map());
 }
 
 /// Magic value stored in ClosureHeader._reserved to identify closures at runtime.
@@ -61,7 +67,8 @@ pub const CLOSURE_MAGIC: u32 = 0x434C_4F53; // "CLOS" in ASCII
 // #29 `perry/thread`) currently don't see the table because they aren't
 // supposed to invoke arbitrary user closures across the boundary anyway.
 thread_local! {
-    static CLOSURE_REST_REGISTRY: RefCell<HashMap<usize, u32>> = RefCell::new(HashMap::new());
+    static CLOSURE_REST_REGISTRY: RefCell<crate::fast_hash::PtrHashMap<usize, u32>> =
+        RefCell::new(crate::fast_hash::new_ptr_hash_map());
     /// Side-table mapping closure body `func_ptr` -> declared param count
     /// (for closures WITHOUT a rest param — those use CLOSURE_REST_REGISTRY).
     /// Populated at module init by `js_register_closure_arity`. Looked up by
@@ -76,7 +83,8 @@ thread_local! {
     /// hit exactly this; uninit `headers` slot evaluated to a small denormal
     /// float, slow-path runs, `setDefaultContentType` returns a header object,
     /// `responseHeaders.set(k, v)` then fails with a #510-class TypeError).
-    static CLOSURE_ARITY_REGISTRY: RefCell<HashMap<usize, u32>> = RefCell::new(HashMap::new());
+    static CLOSURE_ARITY_REGISTRY: RefCell<crate::fast_hash::PtrHashMap<usize, u32>> =
+        RefCell::new(crate::fast_hash::new_ptr_hash_map());
 
     /// Unified dispatch lookup, populated lazily on first call to a func_ptr.
     /// Cuts the per-call cost from TWO RefCell::borrow + HashMap::get
@@ -85,8 +93,8 @@ thread_local! {
     /// chains (150k microtasks for the 1k-batch x 50-promise x 3-await
     /// shape). The fast path on a cache hit is one borrow + one
     /// HashMap::get + a small-enum branch.
-    static DISPATCH_CACHE: RefCell<HashMap<usize, DispatchStrategy>> =
-        RefCell::new(HashMap::new());
+    static DISPATCH_CACHE: RefCell<crate::fast_hash::PtrHashMap<usize, DispatchStrategy>> =
+        RefCell::new(crate::fast_hash::new_ptr_hash_map());
 }
 
 /// Per-call dispatch strategy for a closure body. Decided once at first
@@ -565,8 +573,8 @@ const CAPTURED_MISS_STREAK_DISABLE: u32 = 256;
 const CAPTURED_DISABLED_SENTINEL: u32 = u32::MAX;
 
 thread_local! {
-    static CAPTURED_MISS_STREAK: RefCell<HashMap<usize, u32>> =
-        RefCell::new(HashMap::new());
+    static CAPTURED_MISS_STREAK: RefCell<crate::fast_hash::PtrHashMap<usize, u32>> =
+        RefCell::new(crate::fast_hash::new_ptr_hash_map());
 }
 
 /// Per-`func_ptr` single-slot cache for closures with captures. When

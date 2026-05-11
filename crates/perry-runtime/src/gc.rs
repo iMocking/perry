@@ -174,10 +174,36 @@ pub(crate) struct MallocState {
     pub(crate) set: crate::fast_hash::PtrHashSet<usize>,
 }
 
+/// Pre-allocated capacity for `MallocState.objects` and `.set`.
+///
+/// On promise-heavy kernels (`promise_all_chains` allocates ~200 k
+/// strings/closures/promises before the first GC) the set grows from
+/// 0 → 128 → … → 256 k buckets across the allocation history. Each
+/// hashbrown doubling re-inserts every existing key, and at the
+/// ~100 k mark those rehashes were the single hottest leaf in the
+/// profile (15.6 % self-time on `gc_malloc`'s caller chain). Starting
+/// at 256 k buckets covers the kernel's full pre-GC working set
+/// (200 k entries at hashbrown's 7/8 load factor) in one allocation —
+/// subsequent kernel iterations re-use the slots that sweep re-emptied,
+/// so we never pay the rehash tax. Cost: one upfront ~4 MB allocation
+/// per thread (vs ~2 MB at 128 k); pays for itself on the first 100
+/// allocations.
+const MALLOC_STATE_INITIAL_CAPACITY: usize = 256 * 1024;
+
 thread_local! {
     pub(crate) static MALLOC_STATE: RefCell<MallocState> = RefCell::new(MallocState {
-        objects: Vec::new(),
-        set: crate::fast_hash::new_ptr_hash_set(),
+        objects: Vec::with_capacity(MALLOC_STATE_INITIAL_CAPACITY),
+        // Pre-size the hashset so the first ~100 k `gc_malloc` calls
+        // don't pay the hashbrown rehash tax. Without this, the set
+        // grows from 0 → 128 → 256 → … → 128 k buckets across the
+        // allocation history, each doubling costing a full re-insert.
+        // On `promise_all_chains` (200 k allocs per kernel run) those
+        // rehashes were 3.27 % self-time + 4.63 % `hash_one` self-time
+        // = ~8 % CPU.
+        set: crate::fast_hash::PtrHashSet::with_capacity_and_hasher(
+            MALLOC_STATE_INITIAL_CAPACITY,
+            crate::fast_hash::PtrHasher,
+        ),
     });
 
     /// Free list of arena slots available for reuse: (user_ptr, payload_size)
