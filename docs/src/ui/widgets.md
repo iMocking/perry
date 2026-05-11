@@ -388,6 +388,14 @@ macOS uses `NSPanel` + `NSTrackingArea`; other platforms stub. For
 plain-text tooltips with VoiceOver / a11y support, prefer the simpler
 `widgetSetTooltip`.
 
+### WebView (issue #658)
+
+`WebView({ url, allowedDomains?, onShouldNavigate?, ... })` embeds a
+real browser engine — `WKWebView` on Apple, `WebView2` on Windows,
+`WebKitGTK 6.0` on Linux, `android.webkit.WebView` on Android,
+sandboxed `<iframe>` on web. See [WebView](webview.md) for the full
+OAuth / callback-interception pattern and the per-platform notes.
+
 These are linked from their own pages where richer examples exist.
 
 ## Common widget helpers

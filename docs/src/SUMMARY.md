@@ -50,6 +50,7 @@
 - [Multi-Window](ui/multi-window.md)
 - [Theming](ui/theming.md)
 - [Camera](ui/camera.md)
+- [WebView](ui/webview.md)
 
 # Platforms
 
