@@ -5179,22 +5179,19 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
         }
 
-        // -------- IsNaN (special variant) --------
-        // The HIR has Expr::IsNaN(operand) for `isNaN(x)` (the global
-        // function). NaN ≠ NaN by definition, so the LLVM idiom is
-        // `fcmp uno x, x` (unordered, true iff either operand is NaN).
+        // -------- isNaN(x) — global, coerces via ToNumber --------
+        // Per ECMA-262 §19.2.3, the global `isNaN` first coerces its
+        // argument via ToNumber and then checks if the result is NaN.
+        // The pre-fix inline `fcmp uno x, x` idiom checked the raw bit
+        // pattern, but every NaN-boxed value (strings, pointers, etc.)
+        // has a NaN bit pattern — `isNaN("1")` returned true (correct
+        // is false because "1" coerces to 1). Route to `js_is_nan` which
+        // implements the ToNumber-then-check sequence. `Number.isNaN`
+        // (strict, no coercion) goes through `Expr::NumberIsNaN` and
+        // already calls `js_number_is_nan`.
         Expr::IsNaN(operand) => {
             let v = lower_expr(ctx, operand)?;
-            let blk = ctx.block();
-            let bit = blk.fcmp("uno", &v, &v);
-            let tagged = blk.select(
-                I1,
-                &bit,
-                I64,
-                crate::nanbox::TAG_TRUE_I64,
-                crate::nanbox::TAG_FALSE_I64,
-            );
-            Ok(blk.bitcast_i64_to_double(&tagged))
+            Ok(ctx.block().call(DOUBLE, "js_is_nan", &[(DOUBLE, &v)]))
         }
 
         // -------- Math.pow (special variant — separate from Binary::Pow) --------
@@ -5585,15 +5582,28 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(nanbox_pointer_inline(blk, &arr_handle))
         }
 
-        // -------- isFinite(x) / Number.isFinite(x) --------
-        // The runtime's js_is_finite already returns NaN-tagged
-        // TAG_TRUE/TAG_FALSE (not a raw 0.0/1.0), so we just
-        // return the result directly. No fcmp conversion needed —
-        // that was wrong because TAG_TRUE is itself a NaN payload
-        // and fcmp("one", NaN, 0.0) always returns false.
-        Expr::IsFinite(operand) | Expr::NumberIsFinite(operand) => {
+        // -------- isFinite(x) — global, coerces to Number first --------
+        // The runtime's js_is_finite returns NaN-tagged TAG_TRUE/TAG_FALSE
+        // (not a raw 0.0/1.0), so we return the result directly. No fcmp
+        // conversion needed — TAG_TRUE is itself a NaN payload and
+        // fcmp("one", NaN, 0.0) always returns false.
+        Expr::IsFinite(operand) => {
             let v = lower_expr(ctx, operand)?;
             Ok(ctx.block().call(DOUBLE, "js_is_finite", &[(DOUBLE, &v)]))
+        }
+
+        // -------- Number.isFinite(x) — strict, no coercion --------
+        // Per ECMA-262 §21.1.2.2, returns false for any non-Number value
+        // (`"1"`, `true`, `null`, etc.) — distinct from the global
+        // `isFinite` which coerces via ToNumber. Pre-fix the codegen
+        // routed both forms to `js_is_finite` (the coercing variant),
+        // so `Number.isFinite("1")` returned true; correct value is
+        // false.
+        Expr::NumberIsFinite(operand) => {
+            let v = lower_expr(ctx, operand)?;
+            Ok(ctx
+                .block()
+                .call(DOUBLE, "js_number_is_finite", &[(DOUBLE, &v)]))
         }
 
         // -------- internal: is value === undefined OR a bare-NaN double --------
