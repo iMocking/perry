@@ -1073,24 +1073,10 @@ fn transform_generator_function(
         *next_func_id += 1;
         id
     };
-
-    let next_closure = Expr::Closure {
-        func_id: next_func_id_val,
-        params: vec![perry_hir::Param {
-            id: next_param_id,
-            name: "__val".to_string(),
-            ty: Type::Any,
-            is_rest: false,
-            default: None,
-        }],
-        return_type: Type::Any,
-        body: next_body,
-        captures: captures.clone(),
-        mutable_captures: mutable_captures.clone(),
-        captures_this: false,
-        enclosing_class: None,
-        is_async: false,
-    };
+    // For the `was_plain_async` path we inline `next_body` directly
+    // into the step closure (see below) rather than wrap it in a
+    // separate `next_closure`. Defer building `next_closure` so we can
+    // hand the raw `next_body` to `build_async_step_driver_direct`.
 
     // Build .return(value) closure — immediately marks done and returns {value, done: true}
     let return_param_id = alloc_local(next_local_id);
@@ -1222,20 +1208,22 @@ fn transform_generator_function(
         // for plain-async — the spec `return()` method only runs when
         // user code calls it directly on a generator object, which
         // can't happen here since the function returns a Promise, not
-        // an iterator). The step driver captures `next_closure` and
-        // `throw_closure` directly as locals, replacing the
-        // `__iter.next(value)` PropertyGet+Call with a single
-        // LocalGet+Call. Also rewrites every iter-result alloc to a
-        // thread-local scratch write to eliminate the per-await
-        // `{value, done}` heap alloc. Safe because plain-async
-        // generators never see user `yield*` (the async→generator
-        // pre-pass only emits `yield x` for `await x`).
-        let mut next_closure_for_step = next_closure;
+        // an iterator). We further FUSE the `__next` body directly
+        // into the step closure body — eliminating the per-call
+        // `__next` allocation, the closure dispatch, and the captures-
+        // box re-lookup that the separate closure-call path required.
+        // The throw path stays as a separate closure (cold), since its
+        // catch routing is tangled with state-machine post-catch
+        // transitions and the fusion benefit there is marginal.
         let mut throw_closure_for_step = throw_closure;
-        rewrite_iter_results_to_scratch(&mut next_closure_for_step);
         rewrite_iter_results_to_scratch(&mut throw_closure_for_step);
+        let mut next_body_for_step = next_body;
+        rewrite_iter_results_in_stmts(&mut next_body_for_step);
         let wrapper_stmts = build_async_step_driver_direct(
-            next_closure_for_step,
+            next_body_for_step,
+            next_param_id,
+            captures.clone(),
+            mutable_captures.clone(),
             throw_closure_for_step,
             next_local_id,
             next_func_id,
@@ -1250,6 +1238,23 @@ fn transform_generator_function(
         // checks it here, and codegen only reads it.
     } else {
         // Plain generator: build the iterator object and return it directly.
+        let next_closure = Expr::Closure {
+            func_id: next_func_id_val,
+            params: vec![perry_hir::Param {
+                id: next_param_id,
+                name: "__val".to_string(),
+                ty: Type::Any,
+                is_rest: false,
+                default: None,
+            }],
+            return_type: Type::Any,
+            body: next_body,
+            captures: captures.clone(),
+            mutable_captures: mutable_captures.clone(),
+            captures_this: false,
+            enclosing_class: None,
+            is_async: false,
+        };
         let iter_obj = Expr::Object(vec![
             ("next".to_string(), next_closure),
             ("return".to_string(), return_closure),
@@ -1541,12 +1546,14 @@ fn build_async_step_driver(
 /// for plain-async — spec `gen.return()` can't be called when the
 /// function returns a Promise instead of an iterator).
 fn build_async_step_driver_direct(
-    next_closure_expr: Expr,
+    next_body: Vec<Stmt>,
+    next_param_id: LocalId,
+    next_captures: Vec<LocalId>,
+    next_mutable_captures: Vec<LocalId>,
     throw_closure_expr: Expr,
     next_local_id: &mut u32,
     next_func_id: &mut u32,
 ) -> Vec<Stmt> {
-    let next_id = alloc_local(next_local_id);
     let throw_id = alloc_local(next_local_id);
     let step_id = alloc_local(next_local_id);
 
@@ -1555,21 +1562,7 @@ fn build_async_step_driver_direct(
     let is_error_param_id = alloc_local(next_local_id);
     let catch_e_id = alloc_local(next_local_id);
 
-    // Inner .then arrow params
-    let then_v_param_id = alloc_local(next_local_id);
-    let then_e_param_id = alloc_local(next_local_id);
-
     let step_func_id = {
-        let id = *next_func_id;
-        *next_func_id += 1;
-        id
-    };
-    let then_v_func_id = {
-        let id = *next_func_id;
-        *next_func_id += 1;
-        id
-    };
-    let then_e_func_id = {
         let id = *next_func_id;
         *next_func_id += 1;
         id
@@ -1596,86 +1589,65 @@ fn build_async_step_driver_direct(
         type_args: vec![],
     };
 
-    // .then arrows — same shape as `build_async_step_driver`.
-    let then_v_arrow = Expr::Closure {
-        func_id: then_v_func_id,
-        params: vec![perry_hir::Param {
-            id: then_v_param_id,
-            name: "__step_v".to_string(),
-            ty: any_ty.clone(),
-            is_rest: false,
-            default: None,
-        }],
-        return_type: any_ty.clone(),
-        body: vec![Stmt::Return(Some(Expr::Call {
-            callee: Box::new(Expr::LocalGet(step_id)),
-            args: vec![Expr::LocalGet(then_v_param_id), Expr::Bool(false)],
-            type_args: vec![],
-        }))],
-        captures: vec![step_id],
-        mutable_captures: vec![step_id],
-        captures_this: false,
-        enclosing_class: None,
-        is_async: false,
-    };
-    let then_e_arrow = Expr::Closure {
-        func_id: then_e_func_id,
-        params: vec![perry_hir::Param {
-            id: then_e_param_id,
-            name: "__step_e".to_string(),
-            ty: any_ty.clone(),
-            is_rest: false,
-            default: None,
-        }],
-        return_type: any_ty.clone(),
-        body: vec![Stmt::Return(Some(Expr::Call {
-            callee: Box::new(Expr::LocalGet(step_id)),
-            args: vec![Expr::LocalGet(then_e_param_id), Expr::Bool(true)],
-            type_args: vec![],
-        }))],
-        captures: vec![step_id],
-        mutable_captures: vec![step_id],
-        captures_this: false,
-        enclosing_class: None,
-        is_async: false,
-    };
+    // Rewrite every Return inside next_body to LabeledBreak(__step_done)
+    // so they fall through to step's post-dispatch code instead of
+    // exiting step entirely. The IterResultSet expression sets the
+    // (value, done) TLS slots; LabeledBreak escapes the inlined body.
+    let step_done_label = "__step_done".to_string();
+    let mut next_body = next_body;
+    rewrite_returns_to_labeled_break(&mut next_body, &step_done_label);
+
+    // The inlined next_body references `next_param_id` (the original
+    // `__val` parameter of the next closure). After fusion that ID
+    // becomes a local of step; we initialize it from value_param_id
+    // before running the body.
+    let mut else_branch: Vec<Stmt> = vec![Stmt::Let {
+        id: next_param_id,
+        name: "__val".to_string(),
+        ty: any_ty.clone(),
+        mutable: false,
+        init: Some(Expr::LocalGet(value_param_id)),
+    }];
+    else_branch.extend(next_body);
 
     // step body
     //   try {
-    //     isError ? __throw(value) : __next(value);
+    //     "__step_done": do {
+    //        if (isError) __throw(value); else { let __val = value; <next_body inlined> }
+    //     } while (false);
     //   } catch (e) {
     //     if (isError) return Promise.reject(e);
     //     return __step(e, true);
     //   }
     //   if (js_iter_result_get_done()) return Promise.resolve(js_iter_result_get_value());
-    //   return Promise.resolve(js_iter_result_get_value()).then(then_v, then_e);
-    let dispatch_iter = Expr::Conditional {
-        condition: Box::new(Expr::LocalGet(is_error_param_id)),
-        then_expr: Box::new(Expr::Call {
+    //   return AsyncStepChain(js_iter_result_get_value(), __step);
+    let dispatch_inner = Stmt::If {
+        condition: Expr::LocalGet(is_error_param_id),
+        then_branch: vec![Stmt::Expr(Expr::Call {
             callee: Box::new(Expr::LocalGet(throw_id)),
             args: vec![Expr::LocalGet(value_param_id)],
             type_args: vec![],
-        }),
-        else_expr: Box::new(Expr::Call {
-            callee: Box::new(Expr::LocalGet(next_id)),
-            args: vec![Expr::LocalGet(value_param_id)],
-            type_args: vec![],
+        })],
+        else_branch: Some(else_branch),
+    };
+
+    // Wrap dispatch in `do { dispatch; } while(false)` so the
+    // wrapping `Stmt::Labeled` registers its label on a loop —
+    // codegen's `label_targets` map is populated only for for/while/
+    // do-while bodies, so plain `Stmt::Labeled { body: If }` would
+    // leave LabeledBreak with no jump target. DoWhile with a constant-
+    // false condition runs the body exactly once.
+    let labeled_loop = Stmt::Labeled {
+        label: step_done_label.clone(),
+        body: Box::new(Stmt::DoWhile {
+            body: vec![dispatch_inner],
+            condition: Expr::Bool(false),
         }),
     };
 
-    // Suppress unused warnings — kept for ABI parity with the
-    // build_async_step_driver pathway in case future code reintroduces
-    // the wrapper-arrow shape.
-    let _ = then_v_arrow;
-    let _ = then_e_arrow;
-    let _ = then_v_param_id;
-    let _ = then_e_param_id;
-    let _ = then_v_func_id;
-    let _ = then_e_func_id;
-
     let step_body: Vec<Stmt> = vec![
         Stmt::Try {
-            body: vec![Stmt::Expr(dispatch_iter)],
+            body: vec![labeled_loop],
             catch: Some(CatchClause {
                 param: Some((catch_e_id, "__step_catch_e".to_string())),
                 body: vec![
@@ -1702,16 +1674,22 @@ fn build_async_step_driver_direct(
             )))],
             else_branch: None,
         },
-        // Optimized: emit AsyncStepChain instead of
-        // `Promise.resolve(IterResultGetValue).then(then_v_arrow, then_e_arrow)`.
-        // The runtime dispatches the step closure directly with
-        // (value, is_error) — saves one closure alloc + one closure
-        // dispatch per await on the primitive-value fast path.
         Stmt::Return(Some(Expr::AsyncStepChain {
             value: Box::new(Expr::IterResultGetValue),
             step_closure: Box::new(Expr::LocalGet(step_id)),
         })),
     ];
+
+    // step closure captures = next_captures + [throw_id, step_id]
+    let mut step_captures: Vec<LocalId> = next_captures;
+    step_captures.push(throw_id);
+    step_captures.push(step_id);
+    step_captures.sort();
+    step_captures.dedup();
+    let mut step_mut_captures: Vec<LocalId> = next_mutable_captures;
+    step_mut_captures.push(step_id);
+    step_mut_captures.sort();
+    step_mut_captures.dedup();
 
     let step_closure = Expr::Closure {
         func_id: step_func_id,
@@ -1733,27 +1711,19 @@ fn build_async_step_driver_direct(
         ],
         return_type: any_ty.clone(),
         body: step_body,
-        captures: vec![next_id, throw_id, step_id],
-        mutable_captures: vec![step_id],
+        captures: step_captures,
+        mutable_captures: step_mut_captures,
         captures_this: false,
         enclosing_class: None,
         is_async: false,
     };
 
     // Outer wrapper:
-    //   let __next = <next_closure>;
     //   let __throw = <throw_closure>;
     //   let __step;
     //   __step = <step_closure>;
     //   return __step(undefined, false);
     vec![
-        Stmt::Let {
-            id: next_id,
-            name: "__async_next".to_string(),
-            ty: any_ty.clone(),
-            mutable: false,
-            init: Some(next_closure_expr),
-        },
         Stmt::Let {
             id: throw_id,
             name: "__async_throw".to_string(),
@@ -2729,6 +2699,100 @@ fn is_iter_result(expr: &Expr) -> bool {
 /// the hot path.
 fn rewrite_iter_results_to_scratch(expr: &mut Expr) {
     rewrite_expr(expr);
+}
+
+/// Apply iter-result-to-scratch rewrites directly to a statement list
+/// (rather than to a Closure expression). Used by the fused async-step
+/// driver, where next_body is inlined into step's body instead of being
+/// wrapped in a separate closure.
+fn rewrite_iter_results_in_stmts(stmts: &mut Vec<Stmt>) {
+    for s in stmts.iter_mut() {
+        rewrite_stmt(s);
+    }
+}
+
+/// Rewrite every `Stmt::Return` inside `stmts` (recursing through
+/// nested control flow) to `Expr(value) + LabeledBreak(label)` — or
+/// just `LabeledBreak(label)` for `Return(None)`. Used by the fused
+/// async-step driver: the inlined next_body's iter-result returns
+/// (which used to exit the next closure) now break out to the
+/// `__step_done` label so step's post-dispatch code (IterResultGetDone
+/// check + AsyncStepChain) runs instead of step itself returning early.
+///
+/// Does NOT descend into nested closures — those Returns belong to
+/// the closures themselves, not to the outer step body.
+fn rewrite_returns_to_labeled_break(stmts: &mut Vec<Stmt>, label: &str) {
+    let mut i = 0;
+    while i < stmts.len() {
+        let stmt = std::mem::replace(&mut stmts[i], Stmt::Continue);
+        match stmt {
+            Stmt::Return(Some(e)) => {
+                stmts[i] = Stmt::Expr(e);
+                stmts.insert(i + 1, Stmt::LabeledBreak(label.to_string()));
+                i += 2;
+            }
+            Stmt::Return(None) => {
+                stmts[i] = Stmt::LabeledBreak(label.to_string());
+                i += 1;
+            }
+            mut other => {
+                rewrite_returns_to_labeled_break_in_stmt(&mut other, label);
+                stmts[i] = other;
+                i += 1;
+            }
+        }
+    }
+}
+
+fn rewrite_returns_to_labeled_break_in_stmt(stmt: &mut Stmt, label: &str) {
+    match stmt {
+        Stmt::Return(_) => {
+            unreachable!(
+                "rewrite_returns_to_labeled_break_in_stmt should not see a bare Return"
+            );
+        }
+        Stmt::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            rewrite_returns_to_labeled_break(then_branch, label);
+            if let Some(eb) = else_branch.as_mut() {
+                rewrite_returns_to_labeled_break(eb, label);
+            }
+        }
+        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
+            rewrite_returns_to_labeled_break(body, label);
+        }
+        Stmt::For { init, body, .. } => {
+            if let Some(init_stmt) = init.as_mut() {
+                rewrite_returns_to_labeled_break_in_stmt(init_stmt.as_mut(), label);
+            }
+            rewrite_returns_to_labeled_break(body, label);
+        }
+        Stmt::Try {
+            body,
+            catch,
+            finally,
+        } => {
+            rewrite_returns_to_labeled_break(body, label);
+            if let Some(c) = catch.as_mut() {
+                rewrite_returns_to_labeled_break(&mut c.body, label);
+            }
+            if let Some(f) = finally.as_mut() {
+                rewrite_returns_to_labeled_break(f, label);
+            }
+        }
+        Stmt::Switch { cases, .. } => {
+            for c in cases.iter_mut() {
+                rewrite_returns_to_labeled_break(&mut c.body, label);
+            }
+        }
+        Stmt::Labeled { body, .. } => {
+            rewrite_returns_to_labeled_break_in_stmt(body.as_mut(), label);
+        }
+        _ => {}
+    }
 }
 
 fn rewrite_expr(expr: &mut Expr) {
