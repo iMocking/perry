@@ -6215,8 +6215,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             // Materialize raw array — same path, but all elements are
             // String literals (built at HIR lowering from each quasi's
             // `.raw` text), so build a Vec<Expr::String> on the fly.
-            let raw_exprs: Vec<Expr> =
-                raw.iter().map(|s| Expr::String(s.clone())).collect();
+            let raw_exprs: Vec<Expr> = raw.iter().map(|s| Expr::String(s.clone())).collect();
             let raw_box = lower_array_literal(ctx, &raw_exprs)?;
             let blk = ctx.block();
             let cooked_handle = unbox_to_i64(blk, &cooked_box);

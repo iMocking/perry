@@ -7647,13 +7647,13 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                             // read that returns undefined.
                             if (prop_name == "groups" || prop_name == "index")
                                 && match member.obj.as_ref() {
-                                    ast::Expr::Ident(ident) => ctx
-                                        .regex_exec_locals
-                                        .contains(&ident.sym.to_string()),
+                                    ast::Expr::Ident(ident) => {
+                                        ctx.regex_exec_locals.contains(&ident.sym.to_string())
+                                    }
                                     ast::Expr::TsNonNull(nn) => match nn.expr.as_ref() {
-                                        ast::Expr::Ident(ident) => ctx
-                                            .regex_exec_locals
-                                            .contains(&ident.sym.to_string()),
+                                        ast::Expr::Ident(ident) => {
+                                            ctx.regex_exec_locals.contains(&ident.sym.to_string())
+                                        }
                                         _ => false,
                                     },
                                     _ => false,

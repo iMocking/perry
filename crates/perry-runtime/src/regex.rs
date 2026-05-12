@@ -397,11 +397,7 @@ pub extern "C" fn js_string_match(
                                 name.as_ptr(),
                                 name.len() as u32,
                             );
-                            crate::object::js_object_set_field_by_name(
-                                groups_obj,
-                                key_ptr,
-                                val,
-                            );
+                            crate::object::js_object_set_field_by_name(groups_obj, key_ptr, val);
                         }
                         LAST_EXEC_GROUPS.with(|g| *g.borrow_mut() = groups_obj);
                     } else {

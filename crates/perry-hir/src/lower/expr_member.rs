@@ -564,14 +564,8 @@ pub(super) fn lower_member(ctx: &mut LoweringContext, member: &ast::MemberExpr) 
             if let ast::Expr::Ident(ident) = member.obj.as_ref() {
                 let recv_ty = ctx.lookup_local_type(ident.sym.as_ref());
                 let is_array = match recv_ty {
-                    Some(perry_types::Type::Array(_)) | Some(perry_types::Type::Tuple(_)) => {
-                        true
-                    }
-                    Some(perry_types::Type::Named(n))
-                        if n == "TemplateStringsArray" =>
-                    {
-                        true
-                    }
+                    Some(perry_types::Type::Array(_)) | Some(perry_types::Type::Tuple(_)) => true,
+                    Some(perry_types::Type::Named(n)) if n == "TemplateStringsArray" => true,
                     _ => false,
                 };
                 if is_array {
