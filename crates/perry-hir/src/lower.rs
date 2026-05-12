@@ -7631,9 +7631,44 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                     let prop_expr = match &member.prop {
                         ast::MemberProp::Ident(ident) => {
                             let prop_name = ident.sym.to_string();
-                            Expr::PropertyGet {
-                                object: Box::new(obj_expr.clone()),
-                                property: prop_name,
+                            // Mirror the eager-fold from
+                            // `expr_member::lower_member` for `m.index` /
+                            // `m.groups` when `m` is a tracked
+                            // regex.exec()/string.match() result. The
+                            // standard `lower_member` fires when the
+                            // AST is `m.groups`; for the optional-chain
+                            // form `m?.groups` SWC routes here, the
+                            // `member.obj` has already been lowered to
+                            // `LocalGet(...)`, so `lower_member`'s
+                            // `ast::Expr::Ident` check fails. Intercept
+                            // here so the optional-chain shape also
+                            // resolves to the thread-local groups
+                            // object instead of a generic property
+                            // read that returns undefined.
+                            if (prop_name == "groups" || prop_name == "index")
+                                && match member.obj.as_ref() {
+                                    ast::Expr::Ident(ident) => ctx
+                                        .regex_exec_locals
+                                        .contains(&ident.sym.to_string()),
+                                    ast::Expr::TsNonNull(nn) => match nn.expr.as_ref() {
+                                        ast::Expr::Ident(ident) => ctx
+                                            .regex_exec_locals
+                                            .contains(&ident.sym.to_string()),
+                                        _ => false,
+                                    },
+                                    _ => false,
+                                }
+                            {
+                                if prop_name == "groups" {
+                                    Expr::RegExpExecGroups
+                                } else {
+                                    Expr::RegExpExecIndex
+                                }
+                            } else {
+                                Expr::PropertyGet {
+                                    object: Box::new(obj_expr.clone()),
+                                    property: prop_name,
+                                }
                             }
                         }
                         ast::MemberProp::Computed(comp) => {
@@ -9788,7 +9823,9 @@ fn is_regex_exec_init(ctx: &LoweringContext, init: &ast::Expr) -> bool {
         if let ast::Callee::Expr(callee) = &call.callee {
             if let ast::Expr::Member(member) = callee.as_ref() {
                 if let ast::MemberProp::Ident(method) = &member.prop {
-                    if method.sym.as_ref() == "exec" {
+                    let name = method.sym.as_ref();
+                    // `regex.exec(str)` — receiver is RegExp.
+                    if name == "exec" {
                         return match member.obj.as_ref() {
                             ast::Expr::Lit(ast::Lit::Regex(_)) => true,
                             ast::Expr::Ident(ident) => ctx
@@ -9797,6 +9834,44 @@ fn is_regex_exec_init(ctx: &LoweringContext, init: &ast::Expr) -> bool {
                                 .unwrap_or(false),
                             _ => false,
                         };
+                    }
+                    // `str.match(regex)` — receiver is String (or
+                    // untyped/Any). The match result has the same
+                    // .index / .groups shape as exec() when the regex
+                    // isn't global, so reuse the same thread-local
+                    // pickup (LAST_EXEC_GROUPS). The match runtime
+                    // stores groups there alongside exec.
+                    if name == "match" {
+                        let recv_ok = match member.obj.as_ref() {
+                            ast::Expr::Lit(ast::Lit::Str(_)) | ast::Expr::Tpl(_) => true,
+                            ast::Expr::Ident(ident) => {
+                                // Accept String OR Any/unknown — false
+                                // positives are limited to user-defined
+                                // `.match()` on Any-typed receivers and
+                                // their `.groups` reads naturally fall
+                                // through to undefined when no string-
+                                // match preceded them.
+                                let ty = ctx.lookup_local_type(ident.sym.as_ref());
+                                matches!(ty, Some(Type::String) | Some(Type::Any) | None)
+                            }
+                            _ => false,
+                        };
+                        // Skip global regex matches — match() with /g
+                        // returns a flat array of full matches with no
+                        // group metadata. Detect via a regex-literal
+                        // arg with `g` flag; an Ident arg (regex stored
+                        // in a variable) is optimistically treated as
+                        // non-global since the common shape is `str.match(/.../)`.
+                        if recv_ok {
+                            let first_arg_is_global_regex =
+                                call.args.first().and_then(|arg| match arg.expr.as_ref() {
+                                    ast::Expr::Lit(ast::Lit::Regex(rx)) => {
+                                        Some(rx.flags.as_ref().contains('g'))
+                                    }
+                                    _ => None,
+                                });
+                            return !matches!(first_arg_is_global_regex, Some(true));
+                        }
                     }
                 }
             }
