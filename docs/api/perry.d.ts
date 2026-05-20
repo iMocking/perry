@@ -1,6 +1,6 @@
 // Auto-generated from Perry's API manifest (#465). Do not edit by hand.
 // Source: perry-api-manifest::API_MANIFEST
-// Coverage: 1021 entries across 77 modules
+// Coverage: 1054 entries across 79 modules
 
 declare module "@perryts/pdf" {
   /** stdlib */
@@ -20,6 +20,78 @@ declare module "argon2" {
   export function hash(password: string): any;
   /** stdlib */
   export function verify(hash: string, password: string): any;
+}
+
+declare module "assert" {
+  /** stdlib */
+  export class AssertionError { [key: string]: any; }
+  /** stdlib */
+  export class CallTracker { [key: string]: any; }
+  /** stdlib */
+  export const strict: any;
+  /** stdlib */
+  export function deepEqual(...args: any[]): any;
+  /** stdlib */
+  export function deepStrictEqual(...args: any[]): any;
+  /** stdlib */
+  export default function (...args: any[]): any;
+  /** stdlib */
+  export function doesNotMatch(...args: any[]): any;
+  /** stdlib */
+  export function equal(...args: any[]): any;
+  /** stdlib */
+  export function fail(...args: any[]): any;
+  /** stdlib */
+  export function ifError(...args: any[]): any;
+  /** stdlib */
+  export function match(...args: any[]): any;
+  /** stdlib */
+  export function notDeepEqual(...args: any[]): any;
+  /** stdlib */
+  export function notDeepStrictEqual(...args: any[]): any;
+  /** stdlib */
+  export function notEqual(...args: any[]): any;
+  /** stdlib */
+  export function notStrictEqual(...args: any[]): any;
+  /** stdlib */
+  export function ok(...args: any[]): any;
+  /** stdlib */
+  export function strict(...args: any[]): any;
+  /** stdlib */
+  export function strictEqual(...args: any[]): any;
+}
+
+declare module "assert/strict" {
+  /** stdlib */
+  export class AssertionError { [key: string]: any; }
+  /** stdlib */
+  export function deepEqual(...args: any[]): any;
+  /** stdlib */
+  export function deepStrictEqual(...args: any[]): any;
+  /** stdlib */
+  export default function (...args: any[]): any;
+  /** stdlib */
+  export function doesNotMatch(...args: any[]): any;
+  /** stdlib */
+  export function equal(...args: any[]): any;
+  /** stdlib */
+  export function fail(...args: any[]): any;
+  /** stdlib */
+  export function ifError(...args: any[]): any;
+  /** stdlib */
+  export function match(...args: any[]): any;
+  /** stdlib */
+  export function notDeepEqual(...args: any[]): any;
+  /** stdlib */
+  export function notDeepStrictEqual(...args: any[]): any;
+  /** stdlib */
+  export function notEqual(...args: any[]): any;
+  /** stdlib */
+  export function notStrictEqual(...args: any[]): any;
+  /** stdlib */
+  export function ok(...args: any[]): any;
+  /** stdlib */
+  export function strictEqual(...args: any[]): any;
 }
 
 declare module "async_hooks" {
