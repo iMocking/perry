@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.1017
+**Current Version:** 0.5.1018
 
 
 ## TypeScript Parity Status
@@ -27,7 +27,7 @@ Tracked via the gap test suite (`test-files/test_gap_*.ts`, 28 tests). Compared 
 
 ## Workflow Requirements
 
-**Default flow is PR-based.** `main` is protected: pushes require a pull request, CI must pass (`lint`, `cargo-test`, `parity`, `compile-smoke`, `api-docs-drift`, `security-audit`), and only squash or rebase merges are allowed (no merge commits, linear history enforced). Admins can bypass for hotfixes/version bumps, but the standard path is:
+**Default flow is PR-based.** `main` is protected: pushes require a pull request, CI must pass (`lint`, `cargo-test`, `api-docs-drift`, `security-audit`), and only squash or rebase merges are allowed (no merge commits, linear history enforced). `parity` and `compile-smoke` are gated to tag pushes only (v0.5.1018) — they no longer run on PRs but still gate the release-packages.yml publish step. Admins can bypass for hotfixes/version bumps, but the standard path is:
 
 1. Branch from `main`, push, open a PR.
 2. Wait for required checks to go green.

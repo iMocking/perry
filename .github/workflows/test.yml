@@ -176,6 +176,15 @@ jobs:
     # macOS is `timeout` on Linux (the run_parity_tests.sh wrapper
     # detects either). Node 22+ is installed via setup-node@v4 below.
     # 10× billing weight cut.
+    #
+    # v0.5.1018: gated to tag pushes only (`github.event_name == 'push'`).
+    # The pull_request trigger above still fires the workflow on PRs for
+    # the lint / cargo-test / api-docs-drift gates, but parity now only
+    # runs on release tags. Direct main commits + PR cycle no longer pay
+    # the ~20 min parity bill; release tagging still catches regressions
+    # before publish (release-packages.yml await-tests gate waits on
+    # this job by name for tag events).
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -293,6 +302,11 @@ jobs:
     # so could try NJOBS=4, but keeping NJOBS=3 + retry conservatively
     # for the cargo auto-optimize race (issue tracked separately).
     # 10× billing weight cut.
+    #
+    # v0.5.1018: gated to tag pushes only (`github.event_name == 'push'`).
+    # See the parity job comment above for rationale — release-packages.yml
+    # still requires this job on tag events before publishing.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

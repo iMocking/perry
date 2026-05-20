@@ -2,6 +2,34 @@
 
 Detailed changelog for Perry. See CLAUDE.md for concise summaries.
 
+## v0.5.1018 — ci(test.yml): gate parity + compile-smoke to tag pushes only
+
+`parity` and `compile-smoke` now run only when the workflow is triggered by a
+`push` event (i.e. a `v*` tag) — they no longer fire on the `pull_request`
+trigger. The intent is to make the PR cycle (and direct main commits) cheaper
+and faster while still gating the actual release artifact: `release-packages.yml`'s
+`await-tests` job polls the Tests workflow on the tagged commit before
+publishing, so the parity + compile-smoke regression coverage still has to be
+green before anything ships to npm / Homebrew / apt.
+
+Changes:
+
+- `.github/workflows/test.yml`: added `if: github.event_name == 'push'` to the
+  `parity` and `compile-smoke` jobs. `lint`, `cargo-test`, `api-docs-drift`,
+  `harmonyos-smoke`, and `doc-tests` continue to run on both PRs and tag
+  pushes.
+- `CLAUDE.md`: updated the workflow-requirements paragraph to reflect the
+  reduced PR-required-check set and called out the tag-only behavior of
+  parity + compile-smoke.
+
+**Branch-protection follow-up (manual, GitHub-side):** the branch-protection
+rule on `main` still lists `parity` and `compile-smoke` as required checks.
+PR merge buttons will block waiting for jobs that never run on PRs until
+those two entries are removed from the required-status-checks list (Settings
+→ Branches → main → Edit → Required status checks, or via
+`gh api repos/PerryTS/perry/branches/main/protection`). This commit only
+changes the workflow side; the protection rule edit has to happen on GitHub.
+
 ## v0.5.1017 — fix(stdlib+ext-fastify): #1120 — fastify reply Buffer / Uint8Array bodies + auto-HEAD-for-GET
 
 Closes #1120 end-to-end. Three coordinated behaviors:
