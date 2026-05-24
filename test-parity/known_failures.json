@@ -1813,5 +1813,11 @@
     "added": "2026-05-24",
     "category": "bug-open",
     "reason": "node:stream: writable.writable boolean lifecycle — does not flip false after finish/close. Flips to PASS when #1531 lands."
+  },
+  "node-suite/stream/iter-helpers/map-returns-readable": {
+    "issue": "1558",
+    "added": "2026-05-24",
+    "category": "bug-open",
+    "reason": "node:stream: readable.map() returns iterable but not a Readable instance — `instanceof Readable` is false. Flips to PASS when #1558 lands."
   }
 }
