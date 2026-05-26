@@ -21,6 +21,9 @@ use crate::lower_string_method::{
 };
 #[allow(unused_imports)]
 use crate::nanbox::{double_literal, POINTER_MASK_I64};
+use crate::native_value::{
+    BoundsState, BufferAccessMode, LoweredValue, MaterializationReason, NativeRep, SemanticKind,
+};
 #[allow(unused_imports)]
 use crate::type_analysis::{
     compute_auto_captures, is_array_expr, is_bigint_expr, is_bool_expr, is_map_expr,
@@ -109,7 +112,24 @@ pub(crate) fn lower(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let data_ptr = blk.load(PTR, &ptr_slot);
             let header_ptr = blk.gep(I8, &data_ptr, &[(I32, "-8")]);
             let len_i32 = blk.load_invariant(I32, &header_ptr);
-            return Ok(blk.sitofp(I32, &len_i32, DOUBLE));
+            let lowered = LoweredValue::buffer_len(len_i32);
+            ctx.record_lowered_value(
+                "Buffer.length",
+                Some(arr_id),
+                "Buffer.length.native_buffer_len",
+                &lowered,
+                None,
+                None,
+                None,
+                false,
+                false,
+                Vec::new(),
+            );
+            return Ok(crate::native_value::materialize_js_value(
+                ctx,
+                lowered,
+                MaterializationReason::FunctionAbi,
+            ));
         }
 
         // `arr.length` / `str.length` — INLINE. Both ArrayHeader and
@@ -422,7 +442,27 @@ pub(crate) fn lower(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     .and_then(|fs| fs.get(property.as_str()))
                     .cloned()
                 {
-                    return Ok(ctx.block().load(DOUBLE, &slot));
+                    let value = ctx.block().load(DOUBLE, &slot);
+                    let lowered = LoweredValue {
+                        semantic: SemanticKind::JsValue,
+                        rep: NativeRep::JsValue,
+                        llvm_ty: DOUBLE,
+                        value: value.clone(),
+                    };
+                    ctx.record_lowered_value_with_access_mode(
+                        "ScalarObjectFieldGet",
+                        Some(*id),
+                        "scalar_object_field_load",
+                        &lowered,
+                        None,
+                        None,
+                        None,
+                        None,
+                        false,
+                        false,
+                        vec![format!("field={}", property)],
+                    );
+                    return Ok(value);
                 }
                 // Issue #613: when the local is scalar-replaced but the
                 // property doesn't match any of its known fields, return
@@ -460,7 +500,27 @@ pub(crate) fn lower(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                         .map(|fs| fs.get(property.as_str()).cloned())
                 }) {
                     if let Some(slot) = slot {
-                        return Ok(ctx.block().load(DOUBLE, &slot));
+                        let value = ctx.block().load(DOUBLE, &slot);
+                        let lowered = LoweredValue {
+                            semantic: SemanticKind::JsValue,
+                            rep: NativeRep::JsValue,
+                            llvm_ty: DOUBLE,
+                            value: value.clone(),
+                        };
+                        ctx.record_lowered_value_with_access_mode(
+                            "ScalarThisFieldGet",
+                            None,
+                            "scalar_object_field_load",
+                            &lowered,
+                            None,
+                            None,
+                            None,
+                            None,
+                            false,
+                            false,
+                            vec![format!("field={}", property)],
+                        );
+                        return Ok(value);
                     }
                     return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
                 }
@@ -973,6 +1033,33 @@ pub(crate) fn lower(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                         let val_fast = blk.load(DOUBLE, &field_ptr);
                         let fast_end_label = blk.label.clone();
                         blk.br(&merge_label);
+                        if requires_raw_f64 {
+                            let fast = LoweredValue {
+                                semantic: SemanticKind::JsNumber,
+                                rep: NativeRep::F64,
+                                llvm_ty: DOUBLE,
+                                value: val_fast.clone(),
+                            };
+                            ctx.record_lowered_value_with_access_mode(
+                                "ClassFieldGet",
+                                None,
+                                "class_field_get.raw_f64_load",
+                                &fast,
+                                Some(BoundsState::Guarded {
+                                    guard_id: "class_field_get_guard".to_string(),
+                                }),
+                                None,
+                                Some(BufferAccessMode::CheckedNative),
+                                None,
+                                false,
+                                false,
+                                vec![
+                                    format!("class={}", class_name),
+                                    format!("field={}", property),
+                                    format!("field_index={}", field_idx_str),
+                                ],
+                            );
+                        }
 
                         ctx.current_block = fallback_idx;
                         let blk = ctx.block();
@@ -984,6 +1071,31 @@ pub(crate) fn lower(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                         );
                         let fallback_end_label = blk.label.clone();
                         blk.br(&merge_label);
+                        if requires_raw_f64 {
+                            let fallback = LoweredValue {
+                                semantic: SemanticKind::JsValue,
+                                rep: NativeRep::JsValue,
+                                llvm_ty: DOUBLE,
+                                value: val_fallback.clone(),
+                            };
+                            ctx.record_lowered_value_with_access_mode(
+                                "ClassFieldGet",
+                                None,
+                                "js_object_get_field_by_name_f64",
+                                &fallback,
+                                Some(BoundsState::Unknown),
+                                None,
+                                Some(BufferAccessMode::DynamicFallback),
+                                Some(MaterializationReason::RuntimeApi),
+                                false,
+                                false,
+                                vec![
+                                    format!("class={}", class_name),
+                                    format!("field={}", property),
+                                    format!("field_index={}", field_idx_str),
+                                ],
+                            );
+                        }
 
                         ctx.current_block = merge_idx;
                         return Ok(ctx.block().phi(

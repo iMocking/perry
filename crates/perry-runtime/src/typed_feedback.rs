@@ -5,7 +5,10 @@
 //! has actually seen at runtime.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    LazyLock, Mutex,
+};
 
 use crate::array::ArrayHeader;
 use crate::object::ObjectHeader;
@@ -18,6 +21,7 @@ const POLYMORPHIC_CAP: usize = 4;
 
 static REGISTRY: LazyLock<Mutex<TypedFeedbackRegistry>> =
     LazyLock::new(|| Mutex::new(TypedFeedbackRegistry::default()));
+static TRACE_DUMPED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
 pub(crate) static TYPED_FEEDBACK_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -322,6 +326,7 @@ pub struct TypedFeedbackSiteSnapshot {
     pub shape_invalidations: u64,
     pub method_invalidations: u64,
     pub representation_invalidations: u64,
+    pub observed_kinds: Vec<serde_json::Value>,
 }
 
 fn read_static_str(ptr: *const u8, len: usize) -> String {
@@ -929,6 +934,12 @@ pub use guards::{
     js_typed_feedback_class_field_get_guard, js_typed_feedback_class_field_set_guard,
     js_typed_feedback_closure_direct_call_guard, js_typed_feedback_method_direct_call_guard,
     js_typed_feedback_native_call_method, js_typed_feedback_native_call_method_apply,
+};
+
+#[path = "typed_feedback/trace.rs"]
+mod trace;
+pub use trace::{
+    js_typed_feedback_maybe_dump_trace, typed_feedback_snapshot, typed_feedback_trace_json,
 };
 
 fn hash_bytes(bytes: &[u8]) -> u64 {
@@ -1736,168 +1747,9 @@ pub fn scan_typed_feedback_roots_mut(visitor: &mut crate::gc::RuntimeRootVisitor
     }
 }
 
-pub fn typed_feedback_snapshot() -> TypedFeedbackSnapshot {
-    let reg = registry();
-    let mut snapshot = TypedFeedbackSnapshot {
-        total_sites: reg.sites.len(),
-        shape_invalidations: reg.shape_invalidations,
-        method_invalidations: reg.method_invalidations,
-        representation_invalidations: reg.representation_invalidations,
-        ..TypedFeedbackSnapshot::default()
-    };
-    let mut rows = Vec::with_capacity(reg.sites.len());
-    for site in reg.sites.values() {
-        let state = site.state();
-        *snapshot
-            .by_kind
-            .entry(site.metadata.kind.as_str().to_string())
-            .or_insert(0) += 1;
-        *snapshot
-            .by_state
-            .entry(state.as_str().to_string())
-            .or_insert(0) += 1;
-        rows.push(TypedFeedbackSiteSnapshot {
-            site_id: site.site_id,
-            kind: site.metadata.kind.as_str(),
-            state: state.as_str(),
-            module: site.metadata.module.clone(),
-            function: site.metadata.function.clone(),
-            source_label: site.metadata.source_label.clone(),
-            operation: site.metadata.operation.clone(),
-            guard_name: site.metadata.guard_name.clone(),
-            fallback_name: site.metadata.fallback_name.clone(),
-            observed_count: site.observed_count,
-            observation_count: site.observations.len(),
-            guard_passes: site.guard_passes,
-            guard_failures: site.guard_failures,
-            fallback_calls: site.fallback_calls,
-            shape_invalidations: site.shape_invalidations,
-            method_invalidations: site.method_invalidations,
-            representation_invalidations: site.representation_invalidations,
-        });
-        snapshot.guard_passes = snapshot.guard_passes.saturating_add(site.guard_passes);
-        snapshot.guard_failures = snapshot.guard_failures.saturating_add(site.guard_failures);
-        snapshot.fallback_calls = snapshot.fallback_calls.saturating_add(site.fallback_calls);
-        snapshot
-            .guards_by_name
-            .entry(site.metadata.guard_name.clone())
-            .or_insert(GuardCounterSnapshot {
-                passes: 0,
-                failures: 0,
-                fallback_calls: 0,
-            })
-            .add_site(site);
-    }
-    rows.sort_by_key(|row| row.site_id);
-    snapshot.sites = rows;
-    snapshot
-}
-
-pub fn typed_feedback_trace_json() -> serde_json::Value {
-    let snapshot = typed_feedback_snapshot();
-    serde_json::json!({
-        "total_sites": snapshot.total_sites,
-        "by_kind": snapshot.by_kind,
-        "by_state": snapshot.by_state,
-        "invalidations": {
-            "shape": snapshot.shape_invalidations,
-            "method": snapshot.method_invalidations,
-            "representation": snapshot.representation_invalidations,
-        },
-        "guards": {
-            "passes": snapshot.guard_passes,
-            "failures": snapshot.guard_failures,
-            "fallback_calls": snapshot.fallback_calls,
-            "by_guard": snapshot.guards_by_name.iter().map(|(name, counters)| {
-                (
-                    name.clone(),
-                    serde_json::json!({
-                        "passes": counters.passes,
-                        "failures": counters.failures,
-                        "fallback_calls": counters.fallback_calls,
-                    }),
-                )
-            }).collect::<serde_json::Map<String, serde_json::Value>>(),
-        },
-        "sites": snapshot.sites.iter().map(|site| {
-            serde_json::json!({
-                "site_id": site.site_id,
-                "kind": site.kind,
-                "state": site.state,
-                "module": site.module,
-                "function": site.function,
-                "source_label": site.source_label,
-                "operation": site.operation,
-                "guard_name": site.guard_name,
-                "fallback_name": site.fallback_name,
-                "observed_count": site.observed_count,
-                "observation_count": site.observation_count,
-                "guard_passes": site.guard_passes,
-                "guard_failures": site.guard_failures,
-                "fallback_calls": site.fallback_calls,
-                "guards": {
-                    "passes": site.guard_passes,
-                    "failures": site.guard_failures,
-                    "fallback_calls": site.fallback_calls,
-                },
-                "invalidations": {
-                    "shape": site.shape_invalidations,
-                    "method": site.method_invalidations,
-                    "representation": site.representation_invalidations,
-                },
-            })
-        }).collect::<Vec<_>>(),
-    })
-}
-
-// #1752: codegen emits calls to these `js_typed_feedback_*` instrumentation
-// helpers (property-get/set, method-call, array index, guard recording, etc.)
-// for sites it decides to profile. Nothing in the Rust crate graph references
-// them, so the default `.a` keeps them via staticlib-export semantics — but
-// the auto-optimize build round-trips the runtime through whole-program LLVM
-// bitcode and is free to internalize + dead-strip an unreferenced `#[no_mangle]`
-// symbol, leaving the codegen call dangling (`Undefined symbols:
-// _js_typed_feedback_native_call_method` etc. at final link — which is exactly
-// how an instrumented async program failed to link under auto-optimize). The
-// `#[used]` typed fn-pointer statics below take the address of each helper,
-// landing the functions themselves in `@llvm.used` so thin-LTO keeps them
-// external (not internalized) and the linker's `-dead_strip` honors them —
-// the same proven retention mechanism as `value/dyn_index.rs` / `process.rs`
-// (#1344). NOTE: a `[usize; N]` (ptrtoint) array or a `[*const (); N]` pointer
-// array do NOT keep the symbols external here — only individual typed
-// fn-pointer statics survive the thin-LTO + `strip=true` release profile
-// (both array forms were verified failing under auto-optimize). Function-
-// pointer types are `Sync`, so no wrapper is needed.
-#[rustfmt::skip]
-mod keep_typed_feedback {
-    use super::*;
-    #[used] static K00: extern "C" fn(u64, u32, *const u8, usize, *const u8, usize, *const u8, usize, *const u8, usize, *const u8, usize, *const u8, usize) = js_typed_feedback_register_site;
-    #[used] static K01: extern "C" fn(u64) = js_typed_feedback_record_guard_pass;
-    #[used] static K02: extern "C" fn(u64) = js_typed_feedback_record_guard_fail;
-    #[used] static K03: extern "C" fn(u64) = js_typed_feedback_record_fallback_call;
-    #[used] static K04: extern "C" fn(u64, *const ObjectHeader, *const crate::StringHeader) = js_typed_feedback_observe_property_get;
-    #[used] static K05: extern "C" fn(u64, *mut ObjectHeader, *const crate::StringHeader) = js_typed_feedback_observe_property_set;
-    #[used] static K06: extern "C" fn(u64, *const ObjectHeader, *const crate::StringHeader) -> f64 = js_typed_feedback_object_get_field_by_name_f64;
-    #[used] static K07: extern "C" fn(u64, *mut ObjectHeader, *const crate::StringHeader, f64) = js_typed_feedback_object_set_field_by_name;
-    #[used] static K08: unsafe extern "C" fn(u64, f64, *const i8, usize, *const f64, usize) -> f64 = js_typed_feedback_native_call_method;
-    #[used] static K09: unsafe extern "C" fn(u64, f64, *const i8, usize, i64) -> f64 = js_typed_feedback_native_call_method_apply;
-    #[used] static K10: extern "C" fn(u64, *const ArrayHeader, u32) -> f64 = js_typed_feedback_array_get_f64;
-    #[used] static K11: extern "C" fn(u64, f64, f64, i32, i32) -> i32 = js_typed_feedback_plain_array_index_get_guard;
-    #[used] static K12: extern "C" fn(u64, f64, f64) -> f64 = js_typed_feedback_array_index_get_fallback_boxed;
-    #[used] static K13: extern "C" fn(u64, *mut ArrayHeader, u32, f64) = js_typed_feedback_array_set_f64;
-    #[used] static K14: extern "C" fn(u64, *mut ArrayHeader, u32, f64) -> *mut ArrayHeader = js_typed_feedback_array_set_f64_extend;
-    #[used] static K15: extern "C" fn(u64, f64, i32, f64, i32) -> i32 = js_typed_feedback_plain_array_index_set_guard;
-    #[used] static K16: extern "C" fn(u64, f64, i32, f64) -> f64 = js_typed_feedback_array_index_set_fallback_boxed;
-    #[used] static K17: extern "C" fn(u64, *const ArrayHeader, u32) = js_typed_feedback_observe_array_element;
-    #[used] static K18: extern "C" fn(u64, *mut ArrayHeader, *const crate::StringHeader, f64) -> *mut ArrayHeader = js_typed_feedback_array_set_string_key;
-    #[used] static K19: extern "C" fn(u64, *mut ArrayHeader, f64, f64) -> *mut ArrayHeader = js_typed_feedback_array_set_index_or_string;
-    #[used] static K20: extern "C" fn(u64, i64, f64, f64) = js_typed_feedback_object_set_index_polymorphic;
-    #[used] static K21: extern "C" fn(u64, *mut ObjectHeader, u32, *const crate::StringHeader, f64) = js_typed_feedback_object_set_unboxed_f64_field;
-    #[used] static K22: extern "C" fn(u64, f64) -> f64 = js_typed_feedback_observe_helper_return;
-}
-
 #[cfg(test)]
 pub(crate) fn reset_typed_feedback_for_tests() {
+    TRACE_DUMPED.store(false, Ordering::Release);
     let mut reg = registry();
     *reg = TypedFeedbackRegistry::default();
 }

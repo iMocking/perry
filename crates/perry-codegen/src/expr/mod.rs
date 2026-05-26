@@ -25,7 +25,8 @@ use crate::nanbox::{double_literal, POINTER_MASK_I64};
 use crate::native_value::{
     AliasState, BoundedBufferIndex, BoundsProof, BoundsState, BufferAccessMode, BufferElem,
     BufferViewRep, BufferViewSlot, ExpectedNativeRep, LengthSource, LoweredValue,
-    MaterializationReason, NativeRep, NativeRepRecord, SemanticKind,
+    MaterializationReason, NativeFactUse, NativeRep, NativeRepRecord, NativeValueState,
+    ScalarConversionRecord, SemanticKind,
 };
 use crate::strings::StringPool;
 use crate::type_analysis::{
@@ -49,6 +50,7 @@ mod nanbox_inline;
 mod object_literal;
 mod range_facts;
 mod strings;
+mod typed_feedback;
 mod url_helpers;
 mod v8_interop;
 mod write_barrier;
@@ -82,11 +84,16 @@ pub(crate) use nanbox_inline::{
 };
 pub(crate) use object_literal::lower_object_literal;
 pub(crate) use range_facts::{
-    bounds_for_buffer_access, effective_alias_state_for_access, int_range_expr,
-    invalidate_local_write_facts, record_int_facts_for_let, record_int_facts_for_local_set,
-    record_int_facts_for_update, while_condition_range_fact, IntRange, IntRangeFact,
+    bounds_for_buffer_access, bounds_for_buffer_access_width, effective_alias_state_for_access,
+    int_range_expr, invalidate_local_write_facts, record_int_facts_for_let,
+    record_int_facts_for_local_set, record_int_facts_for_update, while_condition_range_fact,
+    IntRange, IntRangeFact,
 };
 pub(crate) use strings::emit_string_literal_global;
+pub(crate) use typed_feedback::{
+    emit_typed_feedback_observe_helper_return, emit_typed_feedback_register_site,
+    native_region_slug, TypedFeedbackContract, TypedFeedbackKind,
+};
 pub(crate) use url_helpers::lower_url_string_getter;
 pub(crate) use v8_interop::{
     emit_v8_export_call, emit_v8_member_method_call, import_origin_suffix, try_static_class_name,
@@ -387,8 +394,8 @@ pub(crate) struct FnCtx<'a> {
     /// bit but for class-method dispatch.
     pub method_has_rest: &'a std::collections::HashMap<(String, String), bool>,
     /// FFI manifest: `name → (param_kinds, return_kind)` from
-    /// `package.json` `nativeLibrary.functions`. Each kind is a string like
-    /// `"i64"`, `"f64"`, `"void"`, `"string"`, or `"ptr"`. `lower_call` consults
+    /// `package.json` `nativeLibrary.functions`. Kinds use the native-library
+    /// manifest ABI vocabulary. `lower_call` consults
     /// this at native-library call sites so handle-returning functions
     /// (`*mut View`-typed C entries) declare an `i64` LLVM return type that
     /// reads the C ABI's `x0` register. Without it, the call defaults to
@@ -893,6 +900,213 @@ pub(crate) struct BoundedIndexPair {
     pub scope_id: u32,
 }
 
+fn bounds_proof_label(proof: &BoundsProof) -> &'static str {
+    match proof {
+        BoundsProof::LoopGuard => "loop_guard",
+        BoundsProof::MinLength => "min_length",
+        BoundsProof::ExplicitGuard => "explicit_guard",
+        BoundsProof::ExplicitAssume => "explicit_assume",
+    }
+}
+
+fn materialization_reason_label(reason: &MaterializationReason) -> &'static str {
+    match reason {
+        MaterializationReason::FunctionAbi => "function_abi",
+        MaterializationReason::ReturnAbi => "return_abi",
+        MaterializationReason::GenericCall => "generic_call",
+        MaterializationReason::DynamicPropertyAccess => "dynamic_property_access",
+        MaterializationReason::ExceptionPath => "exception_path",
+        MaterializationReason::RuntimeApi => "runtime_api",
+        MaterializationReason::DebugLogging => "debug_logging",
+        MaterializationReason::UnknownAlias => "unknown_alias",
+        MaterializationReason::UnknownBounds => "unknown_bounds",
+        MaterializationReason::ClosureCapture => "closure_capture",
+        MaterializationReason::Reassignment => "reassignment",
+        MaterializationReason::UnknownCallEscape => "unknown_call_escape",
+    }
+}
+
+fn native_fact_use(
+    kind: &'static str,
+    local_id: Option<u32>,
+    state: &'static str,
+    detail: &str,
+    reason: Option<MaterializationReason>,
+) -> NativeFactUse {
+    let local = local_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    NativeFactUse {
+        fact_id: format!("native_region.{}.{}.{}", kind, local, detail),
+        kind: kind.to_string(),
+        local_id,
+        state: state.to_string(),
+        reason,
+    }
+}
+
+fn native_fact_uses_for_record(
+    local_id: Option<u32>,
+    lowered: &LoweredValue,
+    bounds_state: Option<&BoundsState>,
+    alias_state: Option<&AliasState>,
+    access_mode: Option<&BufferAccessMode>,
+    materialization_reason: Option<&MaterializationReason>,
+) -> (Vec<NativeFactUse>, Vec<NativeFactUse>) {
+    let mut consumed = Vec::new();
+    let mut rejected = Vec::new();
+    match &lowered.rep {
+        NativeRep::JsValue => {}
+        NativeRep::I32 => consumed.push(native_fact_use(
+            "representation",
+            local_id,
+            "consumed",
+            "i32",
+            None,
+        )),
+        NativeRep::I64 => consumed.push(native_fact_use(
+            "representation",
+            local_id,
+            "consumed",
+            "i64",
+            None,
+        )),
+        NativeRep::U32 => consumed.push(native_fact_use(
+            "representation",
+            local_id,
+            "consumed",
+            "u32",
+            None,
+        )),
+        NativeRep::U64 => consumed.push(native_fact_use(
+            "representation",
+            local_id,
+            "consumed",
+            "u64",
+            None,
+        )),
+        NativeRep::USize => consumed.push(native_fact_use(
+            "representation",
+            local_id,
+            "consumed",
+            "usize",
+            None,
+        )),
+        NativeRep::F64 => consumed.push(native_fact_use(
+            "representation",
+            local_id,
+            "consumed",
+            "f64",
+            None,
+        )),
+        NativeRep::F32 => consumed.push(native_fact_use(
+            "representation",
+            local_id,
+            "consumed",
+            "f32",
+            None,
+        )),
+        NativeRep::U8 => consumed.push(native_fact_use(
+            "representation",
+            local_id,
+            "consumed",
+            "u8",
+            None,
+        )),
+        NativeRep::BufferLen => consumed.push(native_fact_use(
+            "representation",
+            local_id,
+            "consumed",
+            "buffer_len",
+            None,
+        )),
+        NativeRep::NativeHandle => consumed.push(native_fact_use(
+            "representation",
+            local_id,
+            "consumed",
+            "native_handle",
+            None,
+        )),
+        NativeRep::PromiseBoundary => consumed.push(native_fact_use(
+            "representation",
+            local_id,
+            "consumed",
+            "promise_boundary",
+            None,
+        )),
+        NativeRep::BufferView(_) => consumed.push(native_fact_use(
+            "representation",
+            local_id,
+            "consumed",
+            "buffer_view",
+            None,
+        )),
+    }
+    match bounds_state {
+        Some(BoundsState::Proven { proof }) => consumed.push(native_fact_use(
+            "bounds",
+            local_id,
+            "consumed",
+            bounds_proof_label(proof),
+            None,
+        )),
+        Some(BoundsState::Guarded { guard_id }) => consumed.push(native_fact_use(
+            "bounds", local_id, "consumed", guard_id, None,
+        )),
+        Some(BoundsState::Unknown) | None => {
+            if matches!(
+                access_mode,
+                Some(BufferAccessMode::DynamicFallback | BufferAccessMode::CheckedNative)
+            ) {
+                rejected.push(native_fact_use(
+                    "bounds",
+                    local_id,
+                    "missing",
+                    "unknown",
+                    materialization_reason.cloned(),
+                ));
+            }
+        }
+    }
+    match alias_state {
+        Some(AliasState::NoAliasProven) => consumed.push(native_fact_use(
+            "alias_noalias",
+            local_id,
+            "consumed",
+            "noalias_proven",
+            None,
+        )),
+        Some(AliasState::NoAliasGuarded { guard_id }) => consumed.push(native_fact_use(
+            "alias_noalias",
+            local_id,
+            "consumed",
+            guard_id,
+            None,
+        )),
+        Some(AliasState::MayAlias | AliasState::Unknown) | None => {
+            if matches!(access_mode, Some(BufferAccessMode::DynamicFallback)) {
+                rejected.push(native_fact_use(
+                    "alias_noalias",
+                    local_id,
+                    "missing",
+                    "unknown_or_may_alias",
+                    materialization_reason.cloned(),
+                ));
+            }
+        }
+    }
+    if let Some(reason) = materialization_reason {
+        rejected.push(native_fact_use(
+            "materialization_hazard",
+            local_id,
+            "invalidated",
+            materialization_reason_label(reason),
+            Some(reason.clone()),
+        ));
+    }
+    (consumed, rejected)
+}
+
 impl<'a> FnCtx<'a> {
     pub fn next_loop_proof_scope_id(&mut self) -> u32 {
         let id = self.next_loop_proof_scope_id;
@@ -990,7 +1204,64 @@ impl<'a> FnCtx<'a> {
         emitted_noalias: bool,
         notes: Vec<String>,
     ) {
+        self.record_lowered_value_with_access_mode_and_conversion(
+            expr_kind,
+            local_id,
+            consumer,
+            lowered,
+            bounds_state,
+            alias_state,
+            access_mode,
+            materialization_reason,
+            None,
+            emitted_inbounds,
+            emitted_noalias,
+            notes,
+        );
+    }
+
+    pub fn record_lowered_value_with_access_mode_and_conversion(
+        &mut self,
+        expr_kind: impl Into<String>,
+        local_id: Option<u32>,
+        consumer: impl Into<String>,
+        lowered: &LoweredValue,
+        bounds_state: Option<BoundsState>,
+        alias_state: Option<AliasState>,
+        access_mode: Option<BufferAccessMode>,
+        materialization_reason: Option<MaterializationReason>,
+        scalar_conversion: Option<ScalarConversionRecord>,
+        emitted_inbounds: bool,
+        emitted_noalias: bool,
+        notes: Vec<String>,
+    ) {
         let block_label = self.current_block_label();
+        let (consumed_facts, rejected_facts) = native_fact_uses_for_record(
+            local_id,
+            lowered,
+            bounds_state.as_ref(),
+            alias_state.as_ref(),
+            access_mode.as_ref(),
+            materialization_reason.as_ref(),
+        );
+        let fallback_reason = if matches!(
+            access_mode.as_ref(),
+            Some(BufferAccessMode::DynamicFallback)
+        ) {
+            materialization_reason.clone()
+        } else {
+            None
+        };
+        let native_value_state = if matches!(
+            access_mode.as_ref(),
+            Some(BufferAccessMode::DynamicFallback)
+        ) {
+            NativeValueState::DynamicFallback
+        } else if materialization_reason.is_some() {
+            NativeValueState::Materialized
+        } else {
+            NativeValueState::RegionLocal
+        };
         self.native_rep_records.push(NativeRepRecord {
             function: self.func.name.clone(),
             block_label: block_label.clone(),
@@ -1010,283 +1281,16 @@ impl<'a> FnCtx<'a> {
             alias_state,
             access_mode,
             materialization_reason,
+            fallback_reason,
+            native_value_state,
+            native_abi_transition: scalar_conversion.clone(),
+            scalar_conversion,
+            consumed_facts,
+            rejected_facts,
             emitted_inbounds,
             emitted_noalias,
             notes,
         });
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum TypedFeedbackKind {
-    PropertyGet,
-    PropertySet,
-    MethodCall,
-    ClosureCall,
-    ArrayElement,
-    NumericFieldWrite,
-    HelperReturn,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct TypedFeedbackContract {
-    guard_name: &'static str,
-    fallback_name: &'static str,
-}
-
-impl TypedFeedbackContract {
-    pub(crate) const fn new(guard_name: &'static str, fallback_name: &'static str) -> Self {
-        Self {
-            guard_name,
-            fallback_name,
-        }
-    }
-
-    pub(crate) const fn object_get_by_name() -> Self {
-        Self::new(
-            "object_get_by_name_guard",
-            "js_object_get_field_by_name_f64",
-        )
-    }
-
-    pub(crate) const fn object_set_by_name() -> Self {
-        Self::new("object_set_by_name_guard", "js_object_set_field_by_name")
-    }
-
-    pub(crate) const fn class_field_get() -> Self {
-        Self::new("class_field_get_guard", "js_object_get_field_by_name_f64")
-    }
-
-    pub(crate) const fn class_field_set() -> Self {
-        Self::new("class_field_set_guard", "js_object_set_field_by_name")
-    }
-
-    pub(crate) const fn method_call() -> Self {
-        Self::new("method_call_guard", "js_native_call_method")
-    }
-
-    pub(crate) const fn method_direct_call() -> Self {
-        Self::new("method_direct_call_guard", "js_native_call_method")
-    }
-
-    pub(crate) const fn method_apply_call() -> Self {
-        Self::new("method_call_guard", "js_native_call_method_apply")
-    }
-
-    pub(crate) const fn closure_direct_call() -> Self {
-        Self::new("closure_direct_call_guard", "js_closure_callN")
-    }
-
-    pub(crate) const fn array_get_index() -> Self {
-        Self::new(
-            "plain_array_index_get_guard",
-            "js_typed_feedback_array_index_get_fallback_boxed",
-        )
-    }
-
-    pub(crate) const fn numeric_array_get_index() -> Self {
-        Self::new(
-            "numeric_array_index_get_guard",
-            "js_typed_feedback_array_index_get_fallback_boxed",
-        )
-    }
-
-    pub(crate) const fn array_set_index() -> Self {
-        Self::new("plain_array_index_set_guard", "js_array_set_f64_extend")
-    }
-
-    pub(crate) const fn bounded_array_set_index() -> Self {
-        Self::new(
-            "plain_array_index_set_guard",
-            "js_typed_feedback_array_index_set_fallback_boxed",
-        )
-    }
-
-    pub(crate) const fn numeric_array_set_index() -> Self {
-        Self::new("numeric_array_index_set_guard", "js_array_set_f64_extend")
-    }
-
-    pub(crate) const fn bounded_numeric_array_set_index() -> Self {
-        Self::new(
-            "numeric_array_index_set_guard",
-            "js_typed_feedback_array_index_set_fallback_boxed",
-        )
-    }
-
-    pub(crate) const fn numeric_array_push() -> Self {
-        Self::new("numeric_array_push_guard", "js_array_push_f64")
-    }
-
-    pub(crate) const fn array_set_string_key() -> Self {
-        Self::new("array_string_key_set_guard", "js_array_set_string_key")
-    }
-
-    pub(crate) const fn polymorphic_index_set() -> Self {
-        Self::new(
-            "polymorphic_index_set_guard",
-            "js_object_set_index_polymorphic",
-        )
-    }
-
-    pub(crate) const fn unboxed_numeric_field_write() -> Self {
-        Self::new(
-            "unboxed_numeric_field_write_guard",
-            "js_object_set_field_by_name",
-        )
-    }
-
-    pub(crate) const fn helper_return() -> Self {
-        Self::new("helper_return_shape_guard", "return_original_jsvalue")
-    }
-}
-
-impl TypedFeedbackKind {
-    fn raw(self) -> u32 {
-        match self {
-            Self::PropertyGet => 0,
-            Self::PropertySet => 1,
-            Self::MethodCall => 2,
-            Self::ClosureCall => 3,
-            Self::ArrayElement => 4,
-            Self::NumericFieldWrite => 5,
-            Self::HelperReturn => 6,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::PropertyGet => "property_get",
-            Self::PropertySet => "property_set",
-            Self::MethodCall => "method_call",
-            Self::ClosureCall => "closure_call",
-            Self::ArrayElement => "array_element",
-            Self::NumericFieldWrite => "numeric_field_write",
-            Self::HelperReturn => "helper_return",
-        }
-    }
-}
-
-fn escape_bytes_for_llvm_ir(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() + 8);
-    s.push_str("c\"");
-    for &b in bytes {
-        if (32..127).contains(&b) && b != b'"' && b != b'\\' {
-            s.push(b as char);
-        } else {
-            s.push('\\');
-            s.push_str(&format!("{:02X}", b));
-        }
-    }
-    s.push_str("\\00\"");
-    s
-}
-
-fn emit_typed_feedback_bytes_global(
-    ctx: &mut FnCtx<'_>,
-    site_local: u32,
-    slot: &str,
-    value: &str,
-) -> String {
-    let prefix = ctx.strings.module_prefix();
-    let global = if prefix.is_empty() {
-        format!("perry_typed_feedback_{}_{}", site_local, slot)
-    } else {
-        format!("perry_typed_feedback_{}__{}_{}", prefix, site_local, slot)
-    };
-    ctx.typed_parse_rodata.push(format!(
-        "@{} = private unnamed_addr constant [{} x i8] {}",
-        global,
-        value.len() + 1,
-        escape_bytes_for_llvm_ir(value.as_bytes())
-    ));
-    format!("@{}", global)
-}
-
-pub(crate) fn emit_typed_feedback_register_site(
-    ctx: &mut FnCtx<'_>,
-    kind: TypedFeedbackKind,
-    operation: &str,
-    contract: TypedFeedbackContract,
-) -> String {
-    let local_site_id = ctx.ic_site_counter;
-    ctx.ic_site_counter += 1;
-    let site_id = ctx.typed_feedback_site_id(local_site_id);
-    let module = if ctx.strings.module_prefix().is_empty() {
-        "main".to_string()
-    } else {
-        ctx.strings.module_prefix().to_string()
-    };
-    let function = ctx.func.name.clone();
-    let source_label = format!("{}:{}", kind.label(), operation);
-    let module_global = emit_typed_feedback_bytes_global(ctx, local_site_id, "module", &module);
-    let function_global =
-        emit_typed_feedback_bytes_global(ctx, local_site_id, "function", &function);
-    let source_global =
-        emit_typed_feedback_bytes_global(ctx, local_site_id, "source", &source_label);
-    let operation_global =
-        emit_typed_feedback_bytes_global(ctx, local_site_id, "operation", operation);
-    let guard_global =
-        emit_typed_feedback_bytes_global(ctx, local_site_id, "guard", contract.guard_name);
-    let fallback_global =
-        emit_typed_feedback_bytes_global(ctx, local_site_id, "fallback", contract.fallback_name);
-    ctx.block().call_void(
-        "js_typed_feedback_register_site",
-        &[
-            (I64, &site_id.to_string()),
-            (I32, &kind.raw().to_string()),
-            (PTR, &module_global),
-            (I64, &module.len().to_string()),
-            (PTR, &function_global),
-            (I64, &function.len().to_string()),
-            (PTR, &source_global),
-            (I64, &source_label.len().to_string()),
-            (PTR, &operation_global),
-            (I64, &operation.len().to_string()),
-            (PTR, &guard_global),
-            (I64, &contract.guard_name.len().to_string()),
-            (PTR, &fallback_global),
-            (I64, &contract.fallback_name.len().to_string()),
-        ],
-    );
-    site_id.to_string()
-}
-
-pub(crate) fn emit_typed_feedback_observe_helper_return(
-    ctx: &mut FnCtx<'_>,
-    operation: &str,
-    value: &str,
-) -> String {
-    let site_id = emit_typed_feedback_register_site(
-        ctx,
-        TypedFeedbackKind::HelperReturn,
-        operation,
-        TypedFeedbackContract::helper_return(),
-    );
-    ctx.block().call(
-        DOUBLE,
-        "js_typed_feedback_observe_helper_return",
-        &[(I64, &site_id), (DOUBLE, value)],
-    )
-}
-
-pub(crate) fn native_region_slug(raw: &str) -> String {
-    let mut out = String::new();
-    let mut pending_sep = false;
-    for c in raw.chars() {
-        if c.is_ascii_alphanumeric() {
-            if pending_sep && !out.is_empty() {
-                out.push('_');
-            }
-            out.push(c.to_ascii_lowercase());
-            pending_sep = false;
-        } else {
-            pending_sep = true;
-        }
-    }
-    if out.is_empty() {
-        "unknown".to_string()
-    } else {
-        out
     }
 }
 
@@ -1296,18 +1300,7 @@ pub(crate) fn buffer_view_lowered_value(
     bounds: BoundsState,
     alias: AliasState,
 ) -> LoweredValue {
-    LoweredValue {
-        semantic: SemanticKind::BufferObject,
-        rep: NativeRep::BufferView(BufferViewRep {
-            data_ptr: data_ptr.to_string(),
-            length: length.to_string(),
-            elem: BufferElem::U8,
-            bounds,
-            alias,
-        }),
-        llvm_ty: PTR,
-        value: data_ptr.to_string(),
-    }
+    LoweredValue::buffer_view(data_ptr, length, bounds, alias)
 }
 
 pub(crate) fn downgrade_buffer_alias(ctx: &mut FnCtx<'_>, id: u32, reason: MaterializationReason) {
