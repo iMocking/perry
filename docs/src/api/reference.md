@@ -1428,6 +1428,7 @@ Total: 1296 entries across 81 modules.
 - `appSetTimer` — module
 - `attributedTextAppend` — module
 - `attributedTextClear` — module
+- `blur` — module
 - `bottomNavAddItem` — module
 - `bottomNavSetBadge` — module
 - `bottomNavSetSelected` — module
@@ -1443,11 +1444,14 @@ Total: 1296 entries across 81 modules.
 - `cameraUnregisterFrameCallback` — module
 - `clipboardRead` — module
 - `clipboardWrite` — module
+- `currentModifiers` — module
 - `embedNSView` — module
+- `focus` — module
 - `frameSplitAddChild` — module
 - `frameSplitCreate` — module
 - `imageGalleryAddImage` — module
 - `imageGallerySetIndex` — module
+- `isKeyDown` — module
 - `lazyvstackEndRefreshing` — module
 - `lazyvstackSetRefreshControl` — module
 - `lazyvstackSetScrollEndCallback` — module
@@ -1462,6 +1466,10 @@ Total: 1296 entries across 81 modules.
 - `menuClear` — module
 - `menuCreate` — module
 - `onActivate` — module
+- `onAppKeyDown` — module
+- `onAppKeyUp` — module
+- `onKeyDown` — module
+- `onKeyUp` — module
 - `onTerminate` — module
 - `openFileDialog` — module
 - `openFolderDialog` — module
