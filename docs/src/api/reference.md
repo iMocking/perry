@@ -2,7 +2,7 @@
 
 This page is auto-generated from Perry's compile-time API manifest (`perry-api-manifest::API_MANIFEST`). It is the source of truth for what `perry compile` accepts; references to symbols not listed here produce `R005 UnimplementedApi` (issue #463). Stubs (#464) are flagged ⚠ — they link cleanly but no-op at runtime on the chosen target.
 
-Total: 2405 entries across 104 modules.
+Total: 2397 entries across 104 modules.
 
 ## Modules
 
@@ -515,15 +515,16 @@ Total: 2405 entries across 104 modules.
 - `OPENSSL_VERSION_NUMBER`
 - `O_APPEND`
 - `O_CREAT`
+- `O_DIRECT`
 - `O_DIRECTORY`
 - `O_DSYNC`
 - `O_EXCL`
+- `O_NOATIME`
 - `O_NOCTTY`
 - `O_NOFOLLOW`
 - `O_NONBLOCK`
 - `O_RDONLY`
 - `O_RDWR`
-- `O_SYMLINK`
 - `O_SYNC`
 - `O_TRUNC`
 - `O_WRONLY`
@@ -544,6 +545,7 @@ Total: 2405 entries across 104 modules.
 - `RSA_PSS_SALTLEN_DIGEST`
 - `RSA_PSS_SALTLEN_MAX_SIGN`
 - `RSA_X931_PADDING`
+- `RTLD_DEEPBIND`
 - `RTLD_GLOBAL`
 - `RTLD_LAZY`
 - `RTLD_LOCAL`
@@ -557,15 +559,17 @@ Total: 2405 entries across 104 modules.
 - `SIGFPE`
 - `SIGHUP`
 - `SIGILL`
-- `SIGINFO`
 - `SIGINT`
 - `SIGIO`
 - `SIGIOT`
 - `SIGKILL`
 - `SIGPIPE`
+- `SIGPOLL`
 - `SIGPROF`
+- `SIGPWR`
 - `SIGQUIT`
 - `SIGSEGV`
+- `SIGSTKFLT`
 - `SIGSTOP`
 - `SIGSYS`
 - `SIGTERM`
@@ -2437,6 +2441,7 @@ Total: 2405 entries across 104 modules.
 
 ### Properties
 
+- `default`
 - `ucs2`
 - `version`
 
@@ -2769,27 +2774,14 @@ Total: 2405 entries across 104 modules.
 - `afterEach` — module
 - `before` — module
 - `beforeEach` — module
-- `default` — module
 - `describe` — module
-- `enable` — module *(class: `timers`)*
 - `fn` — module *(class: `mock`)*
-- `getter` — module *(class: `mock`)*
 - `it` — module
-- `method` — module *(class: `mock`)*
 - `only` — module
 - `property` — module *(class: `mock`)*
-- `reset` — module *(class: `mock`)*
-- `restoreAll` — module *(class: `mock`)*
 - `run` — module
-- `runAll` — module *(class: `timers`)*
-- `setDefaultSnapshotSerializers` — module *(class: `snapshot`)*
-- `setResolveSnapshotPath` — module *(class: `snapshot`)*
-- `setTime` — module *(class: `timers`)*
-- `setter` — module *(class: `mock`)*
 - `skip` — module
 - `suite` — module
-- `test` — module
-- `tick` — module *(class: `timers`)*
 - `todo` — module
 
 ### Properties
