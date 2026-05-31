@@ -1,6 +1,6 @@
 // Auto-generated from Perry's API manifest (#465). Do not edit by hand.
 // Source: perry-api-manifest::API_MANIFEST
-// Coverage: 2464 entries across 106 modules
+// Coverage: 2465 entries across 106 modules
 
 type PerryU32 = number & { readonly __perryU32?: never };
 type PerryU64 = number & { readonly __perryU64?: never };
@@ -858,6 +858,8 @@ declare module "crypto" {
   export const constants: any;
   /** stdlib */
   export const subtle: any;
+  /** stdlib */
+  export const webcrypto: any;
   /** stdlib */
   export function createCipheriv(...args: any[]): any;
   /** stdlib */
