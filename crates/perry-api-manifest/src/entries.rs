@@ -4240,12 +4240,13 @@ pub static API_MANIFEST: &[ApiEntry] = &[
     method("axios", "create", false, None),
     method("axios", "all", false, None),
     // --- node-fetch (perry-ext-fetch) — also exposes the Web Fetch
-    //     API classes (Headers, Request, Response, Blob). ---
+    //     API classes (Headers, Request, Response, Blob, FormData). ---
     method("node-fetch", "default", false, None),
     class("node-fetch", "Headers"),
     class("node-fetch", "Request"),
     class("node-fetch", "Response"),
     class("node-fetch", "Blob"),
+    class("node-fetch", "FormData"),
     // --- bignumber.js — alias surface for decimal.js. The wrapper
     //     dispatches to the same perry-ext-decimal implementation. ---
     class("bignumber.js", "BigNumber"),
@@ -4569,6 +4570,7 @@ pub static API_MANIFEST: &[ApiEntry] = &[
     class("fetch", "Request"),
     class("fetch", "Response"),
     class("fetch", "Blob"),
+    class("fetch", "FormData"),
     // --- streams — Web Streams API umbrella (perry-ext-streams). ---
     class("streams", "ReadableStream"),
     class("streams", "WritableStream"),

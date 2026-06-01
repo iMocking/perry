@@ -1,6 +1,6 @@
 // Auto-generated from Perry's API manifest (#465). Do not edit by hand.
 // Source: perry-api-manifest::API_MANIFEST
-// Coverage: 2497 entries across 106 modules
+// Coverage: 2499 entries across 106 modules
 
 type PerryU32 = number & { readonly __perryU32?: never };
 type PerryU64 = number & { readonly __perryU64?: never };
@@ -1371,6 +1371,8 @@ declare module "fetch" {
   /** stdlib */
   export class Blob { [key: string]: any; }
   /** stdlib */
+  export class FormData { [key: string]: any; }
+  /** stdlib */
   export class Headers { [key: string]: any; }
   /** stdlib */
   export class Request { [key: string]: any; }
@@ -1946,6 +1948,8 @@ declare module "node-cron" {
 declare module "node-fetch" {
   /** stdlib */
   export class Blob { [key: string]: any; }
+  /** stdlib */
+  export class FormData { [key: string]: any; }
   /** stdlib */
   export class Headers { [key: string]: any; }
   /** stdlib */
