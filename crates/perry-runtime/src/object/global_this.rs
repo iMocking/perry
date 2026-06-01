@@ -139,6 +139,7 @@ pub(crate) const GLOBAL_THIS_BUILTIN_CONSTRUCTORS: &[&str] = &[
     "MessageChannel",
     "MessagePort",
     "BroadcastChannel",
+    "WebSocket",
     "FinalizationRegistry",
     // #2875: TC39 explicit-resource-management globals.
     "DisposableStack",
@@ -193,6 +194,7 @@ pub(crate) fn builtin_constructor_spec_length(name: &str) -> Option<u32> {
         | "Event"
         | "CustomEvent"
         | "Request"
+        | "WebSocket"
         | "BroadcastChannel"
         | "FinalizationRegistry"
         | "Promise" => 1,
@@ -1149,6 +1151,9 @@ pub(crate) fn populate_global_this_builtins(singleton: *mut ObjectHeader) {
             if matches!(name, "Crypto" | "CryptoKey" | "SubtleCrypto") {
                 super::native_module::install_webcrypto_constructor_proto(proto_obj, ctor_value);
             }
+            if name == "WebSocket" {
+                websocket_global::install_constructor_shape(closure_ptr, proto_obj);
+            }
             // #2145: link per-kind typed-array constructors into the
             // `%TypedArray%` chain. `Int8Array.__proto__ === %TypedArray%`
             // and `Object.getPrototypeOf(Int8Array.prototype) ===
@@ -2068,6 +2073,10 @@ fn populate_builtin_prototype_methods(builtin_name: &str, proto_obj: *mut Object
         }
         "TextDecoder" => {
             install_noop_proto_methods(proto_obj, &[("decode", 1)]);
+            install_noop_proto_methods(proto_obj, OBJECT_PROTO_METHODS);
+        }
+        "WebSocket" => {
+            websocket_global::install_proto_methods(proto_obj);
             install_noop_proto_methods(proto_obj, OBJECT_PROTO_METHODS);
         }
         "Crypto" => {
