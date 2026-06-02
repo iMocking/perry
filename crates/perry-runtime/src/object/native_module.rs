@@ -2441,6 +2441,7 @@ pub(crate) fn native_module_enumerable_keys(module_name: &str) -> Option<&'stati
         "events" => Some(EVENTS_NAMESPACE_KEYS),
         "worker_threads" => Some(WORKER_THREADS_NAMESPACE_KEYS),
         "timers/promises" => Some(&[b"setTimeout", b"setImmediate", b"setInterval", b"scheduler"]),
+        "readline/promises" => Some(&[b"Interface", b"Readline", b"createInterface"]),
         "zlib" => Some(&[b"codes"]),
         _ => None,
     }
@@ -2577,6 +2578,7 @@ fn should_cache_native_module_namespace(module_name: &str) -> bool {
             | "util.types"
             | "path.posix"
             | "path.win32"
+            | "readline/promises"
             | "timers/promises"
             | "crypto.webcrypto"
             | "crypto.subtle"
@@ -5831,20 +5833,23 @@ pub(crate) unsafe fn get_native_module_constant(
             "default" if !is_cjs_default_object => cjs_default_export_value("querystring"),
             _ => None,
         },
-        "constants" => fs_const(property)
-            .or_else(|| fs_const_tail(property))
-            .or_else(|| os_signal_const(property))
-            .or_else(|| os_errno_const(property))
-            .or_else(|| os_priority_const(property))
-            .or_else(|| os_dlopen_const(property))
-            .or_else(|| crypto_const(property))
-            .or_else(|| {
-                if property == "defaultCoreCipherList" {
-                    Some(str_val(DEFAULT_CORE_CIPHER_LIST))
-                } else {
-                    None
-                }
-            }),
+        "constants" => match property {
+            "default" if !is_cjs_default_object => cjs_default_export_value("constants"),
+            _ => fs_const(property)
+                .or_else(|| fs_const_tail(property))
+                .or_else(|| os_signal_const(property))
+                .or_else(|| os_errno_const(property))
+                .or_else(|| os_priority_const(property))
+                .or_else(|| os_dlopen_const(property))
+                .or_else(|| crypto_const(property))
+                .or_else(|| {
+                    if property == "defaultCoreCipherList" {
+                        Some(str_val(DEFAULT_CORE_CIPHER_LIST))
+                    } else {
+                        None
+                    }
+                }),
+        },
         "sqlite" => match property {
             "constants" => Some(create_sub_namespace("sqlite.constants")),
             "Session" => Some(sqlite_session_constructor_value()),
