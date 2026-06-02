@@ -3977,4 +3977,12 @@ declare module "zlib" {
   export function unzip(buffer: any, callback: any): void;
   /** stdlib */
   export function unzipSync(p0: string): any;
+  /** stdlib */
+  export function zstdCompress(buffer: any, callback: any): void;
+  /** stdlib */
+  export function zstdCompressSync(p0: any, options?: any): string;
+  /** stdlib */
+  export function zstdDecompress(buffer: any, callback: any): void;
+  /** stdlib */
+  export function zstdDecompressSync(p0: any, options?: any): string;
 }

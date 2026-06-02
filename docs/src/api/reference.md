@@ -3557,6 +3557,10 @@ Total: 2620 entries across 109 modules.
 - `inflateSync` — module
 - `unzip` — module
 - `unzipSync` — module
+- `zstdCompress` — module
+- `zstdCompressSync` — module
+- `zstdDecompress` — module
+- `zstdDecompressSync` — module
 
 ### Properties
 
