@@ -1610,6 +1610,18 @@ where
             f(key);
             f(value);
         }
+        Expr::PutValueSet {
+            target,
+            key,
+            value,
+            receiver,
+            ..
+        } => {
+            f(target);
+            f(key);
+            f(value);
+            f(receiver);
+        }
         Expr::ReflectSetPrototypeOf { target, proto } => {
             f(target);
             f(proto);
